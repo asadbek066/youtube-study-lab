@@ -19,7 +19,7 @@ VIDEO_TYPES = (
 )
 
 CLASSIFIER_PROMPT = """
-You are analyzing a YouTube transcript.
+Analyze a YouTube transcript and classify it.
 
 Task:
 Classify the transcript into one primary type:
@@ -283,8 +283,11 @@ def _build_reason(video_type: str, scores: dict[str, float], token_counts: Count
         reverse=True,
     )
     positive = [token for token, count in anchors if count > 0][:3]
-    anchor_text = ", ".join(positive) if positive else "overall phrasing and structure"
+    anchor_text = ", ".join(positive) if positive else "overall language and structure"
+    top_score = scores.get(video_type, 0.0)
+    runner_up_score = max((score for kind, score in scores.items() if kind != video_type), default=0.0)
+    margin = top_score - runner_up_score
     return (
-        f"Primary signals point to {video_type} based on recurring cues such as {anchor_text}; "
-        f"its score was highest against the other candidate types."
+        f"Classified as {video_type} from recurring cues ({anchor_text}). "
+        f"Score margin over the next closest type: {margin:.2f}."
     )

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import re
+import time
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -11,6 +13,7 @@ from youtube_study_tool.models import TranscriptBundle, TranscriptSegment
 from youtube_study_tool.utils import clean_whitespace
 
 VIDEO_ID_LENGTH = 11
+LANGUAGE_CODE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 
 
 class TranscriptRetrievalError(Exception):
@@ -30,7 +33,9 @@ def extract_video_id(raw_value: str) -> str:
     path_parts = [part for part in parsed.path.split("/") if part]
 
     if host in {"youtu.be", "www.youtu.be"} and path_parts:
-        return path_parts[0]
+        candidate_id = path_parts[0]
+        if len(candidate_id) == VIDEO_ID_LENGTH and all(char.isalnum() or char in "-_" for char in candidate_id):
+            return candidate_id
 
     if host in {
         "youtube.com",
@@ -42,17 +47,38 @@ def extract_video_id(raw_value: str) -> str:
     }:
         if parsed.path == "/watch":
             video_id = parse_qs(parsed.query).get("v", [None])[0]
-            if video_id:
+            if video_id and len(video_id) == VIDEO_ID_LENGTH and all(
+                char.isalnum() or char in "-_" for char in video_id
+            ):
                 return video_id
         if path_parts and path_parts[0] in {"embed", "shorts", "live", "v"} and len(path_parts) > 1:
-            return path_parts[1]
+            candidate_id = path_parts[1]
+            if len(candidate_id) == VIDEO_ID_LENGTH and all(char.isalnum() or char in "-_" for char in candidate_id):
+                return candidate_id
 
     raise ValueError("That does not look like a valid YouTube URL or video ID.")
 
 
 def normalize_languages(raw_languages: str) -> tuple[str, ...]:
-    languages = [item.strip() for item in raw_languages.split(",") if item.strip()]
-    return tuple(languages or ["en", "en-US", "en-GB"])
+    if not raw_languages:
+        return ("en", "en-US", "en-GB")
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in raw_languages.split(","):
+        language = item.strip()
+        if not language:
+            continue
+        if not LANGUAGE_CODE_RE.match(language):
+            continue
+        normalized = language.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(language)
+        if len(deduped) >= 10:
+            break
+    return tuple(deduped or ["en", "en-US", "en-GB"])
 
 
 class TranscriptService:
@@ -236,9 +262,7 @@ class TranscriptService:
         return None
 
     def _download_caption_segments(self, track_url: str) -> tuple[TranscriptSegment, ...]:
-        response = requests.get(track_url, timeout=20)
-        response.raise_for_status()
-        payload = response.json()
+        payload = self._get_json_with_retries(track_url, timeout=20)
         segments: list[TranscriptSegment] = []
 
         for event in payload.get("events", []):
@@ -269,14 +293,37 @@ class TranscriptService:
         return tuple(deduped_segments)
 
     def _fetch_video_title(self, source_url: str) -> str | None:
-        try:
-            response = requests.get(
-                "https://www.youtube.com/oembed",
-                params={"url": source_url, "format": "json"},
-                timeout=10,
-            )
-            if response.ok:
-                return response.json().get("title")
-        except requests.RequestException:
-            return None
+        for attempt in range(3):
+            try:
+                response = requests.get(
+                    "https://www.youtube.com/oembed",
+                    params={"url": source_url, "format": "json"},
+                    timeout=10,
+                )
+                if response.ok:
+                    payload = response.json()
+                    title = payload.get("title")
+                    if isinstance(title, str) and title.strip():
+                        return title.strip()
+                    return None
+            except requests.RequestException:
+                if attempt == 2:
+                    return None
+                time.sleep(0.2 * (attempt + 1))
         return None
+
+    def _get_json_with_retries(self, url: str, timeout: float, retries: int = 3) -> dict:
+        last_error: Exception | None = None
+        for attempt in range(retries):
+            try:
+                response = requests.get(url, timeout=timeout)
+                response.raise_for_status()
+                payload = response.json()
+                if not isinstance(payload, dict):
+                    raise TranscriptRetrievalError("Caption endpoint returned a non-object JSON payload.")
+                return payload
+            except (requests.RequestException, ValueError, TranscriptRetrievalError) as error:
+                last_error = error
+                if attempt < retries - 1:
+                    time.sleep(0.3 * (attempt + 1))
+        raise TranscriptRetrievalError(f"Failed to download caption track after {retries} attempts: {last_error}")
