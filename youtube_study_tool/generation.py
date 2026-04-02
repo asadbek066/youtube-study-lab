@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
@@ -20,28 +21,29 @@ from youtube_study_tool.settings import LLMSettings, load_settings
 from youtube_study_tool.utils import build_chunked_text, format_seconds
 
 SECTION_RE = re.compile(r"<(?P<name>summary|study_notes|quiz)>\s*(?P<body>.*?)\s*</\1>", re.DOTALL)
+logger = logging.getLogger(__name__)
 
 LEARNING_ASSISTANT_PROMPT = """
-You are an AI learning assistant specialized in YouTube video understanding.
+Role: transcript editor for study materials.
 
-Your job is to:
-1. extract and analyze video transcripts
-2. generate high-quality summaries
+Responsibilities:
+1. analyze transcript content
+2. generate accurate summaries
 3. generate study notes
 4. generate quizzes
-5. adapt output style based on video type
+5. adapt output style to transcript type
 
 Rules:
-- be accurate and do not invent details
-- preserve important meaning, examples, and steps
-- remove fluff, repetition, sponsor talk, and filler
-- prefer clarity and completeness over flashy wording
-- if the transcript is educational, focus on teaching clearly
-- if the transcript is motivational, focus on practical lessons and mindset principles
-- if the transcript is tutorial-based, preserve step-by-step logic
-- if context is long, compress it before final generation
-- always return structured output when requested
-- keep outputs useful for studying, reviewing, and applying knowledge
+- Be accurate and do not invent details.
+- Preserve important meaning, examples, and steps.
+- Remove filler, repetition, sponsor talk, and low-value transitions.
+- Prefer clarity and completeness over style.
+- For educational content, focus on teachable structure.
+- For motivational content, focus on practical lessons and mindset principles.
+- For tutorial content, preserve step order and dependencies.
+- If context is long, compress before final generation.
+- Always return requested structure.
+- Keep output useful for revision and active recall.
 """.strip()
 
 CHUNK_PROMPT = """
@@ -51,7 +53,7 @@ You are helping a student learn from a YouTube transcript excerpt.
 Summarize only what appears in the excerpt below.
 
 Requirements:
-- Capture the main idea, important supporting details, and any examples or definitions.
+- Capture the main point, supporting details, and examples/definitions when present.
 - Keep it to 5-7 bullet points.
 - Skip filler, repetition, and low-value transitions.
 - Ignore greetings, sponsor talk, and housekeeping unless they materially affect the lesson.
@@ -85,6 +87,7 @@ class StudyPackGenerator:
             try:
                 return self._generate_with_llm(bundle)
             except Exception:
+                logger.exception("LLM generation failed, using fallback bundle.")
                 return generate_fallback_bundle(bundle)
         return generate_fallback_bundle(bundle)
 
@@ -151,6 +154,7 @@ class StudyPackGenerator:
         try:
             return parse_classification_json(response_text)
         except Exception:
+            logger.warning("Classification parse failed, using heuristic classification.")
             return heuristic_classification(bundle)
 
     def _chunk_summaries(self, bundle: TranscriptBundle) -> list[str]:
@@ -263,11 +267,11 @@ def _build_final_prompt(settings: LLMSettings, classification: VideoClassificati
     return f"""
 {LEARNING_ASSISTANT_PROMPT}
 
-You are turning a YouTube transcript into a study pack.
+Build a study pack from the provided transcript evidence.
 Use only the evidence in the transcript or chunk summaries provided below.
 
-High-level goal:
-- Create a high-quality detailed summary of the transcript.
+Goals:
+- Create a detailed summary of the transcript.
 - Preserve all important ideas while removing repetition, sponsor talk, greetings, and fluff.
 - Keep the original logic and sequence of the speaker's explanation.
 - Include concrete examples when they genuinely improve understanding.
@@ -283,7 +287,7 @@ Summary mode:
 - Classifier preferred summary style: {classification.best_summary_style}
 - Classifier preferred note style: {classification.best_note_style}
 
-How to adapt the summary:
+Adaptation rules:
 - If the transcript is a tutorial, build, walkthrough, recipe, or process video, emphasize the outcome, major steps, tools/prerequisites, decisions, and pitfalls. Do not list every micro-step unless essential.
 - If the transcript is a coding walkthrough, emphasize stack, file/code changes, implementation order, debugging moments, and tradeoffs.
 - If the transcript is motivational, mindset, or self-improvement content, emphasize the central message, practical actions, mindset shifts, and strongest examples. Avoid repeating the same encouragement in different words.
@@ -294,7 +298,7 @@ How to adapt the summary:
 - If the transcript is explanatory or educational, emphasize the thesis, core concepts, examples, and what someone should remember after watching.
 - If summary style is not obvious or SUMMARY_STYLE is adaptive, infer the best structure from the transcript.
 
-Requirements:
+Output rules:
 - Keep the wording accurate and study-friendly.
 - Call out uncertainty instead of guessing.
 - Make the quiz useful for active recall.
@@ -303,7 +307,7 @@ Requirements:
 <study_notes>...</study_notes>
 <quiz>...</quiz>
 
-Formatting rules:
+Formatting:
 - Use Markdown inside each tag.
 - The summary must start with `## Summary`.
 - Inside `<summary>`, use exactly these sections and this order:

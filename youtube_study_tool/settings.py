@@ -42,6 +42,14 @@ def _read_int(name: str, default: int) -> int:
         return default
 
 
+def _clamp_float(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _clamp_int(value: int, low: int, high: int) -> int:
+    return max(low, min(high, value))
+
+
 def _read_choice(name: str, default: str, allowed: set[str]) -> str:
     value = _read_env(name, default).lower()
     return value if value in allowed else default
@@ -148,6 +156,10 @@ def load_settings() -> LLMSettings:
         requested_provider = "openai" if _read_env("OPENAI_API_KEY") else "heuristic"
 
     provider = requested_provider if requested_provider in SUPPORTED_PROVIDERS else "heuristic"
+    temperature = _clamp_float(_read_float("LLM_TEMPERATURE", 0.3), 0.0, 2.0)
+    chunk_max_output_tokens = _clamp_int(_read_int("LLM_CHUNK_MAX_OUTPUT_TOKENS", 450), 64, 4000)
+    final_max_output_tokens = _clamp_int(_read_int("LLM_FINAL_MAX_OUTPUT_TOKENS", 2600), 128, 16000)
+
     return LLMSettings(
         requested_provider=requested_provider,
         provider=provider,
@@ -160,9 +172,9 @@ def load_settings() -> LLMSettings:
         azure_openai_deployment=_read_env("AZURE_OPENAI_DEPLOYMENT"),
         gemini_api_key=_read_env("GEMINI_API_KEY") or _read_env("GOOGLE_API_KEY"),
         gemini_model=_read_env("GEMINI_MODEL", "gemini-2.5-flash"),
-        temperature=_read_float("LLM_TEMPERATURE", 0.3),
-        chunk_max_output_tokens=_read_int("LLM_CHUNK_MAX_OUTPUT_TOKENS", 450),
-        final_max_output_tokens=_read_int("LLM_FINAL_MAX_OUTPUT_TOKENS", 2600),
+        temperature=temperature,
+        chunk_max_output_tokens=chunk_max_output_tokens,
+        final_max_output_tokens=final_max_output_tokens,
         summary_style=_read_choice("SUMMARY_STYLE", "adaptive", SUPPORTED_SUMMARY_STYLES),
         summary_detail=_read_choice("SUMMARY_DETAIL", "balanced", SUPPORTED_SUMMARY_DETAILS),
     )

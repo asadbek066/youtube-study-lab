@@ -45,7 +45,7 @@ def _build_summary(
 ) -> str:
     lines = ["## Summary"]
     if not passages:
-        lines.append("- The transcript was fetched, but there was not enough content to summarize.")
+        lines.append("- Transcript was available, but there was not enough usable content for a reliable summary.")
         return "\n".join(lines)
 
     lines.append("### 1. Overview")
@@ -145,7 +145,7 @@ def _build_topic(bundle: TranscriptBundle, passages: list[Passage]) -> str:
         return bundle.video_title
     if passages:
         return passages[0].text
-    return "The transcript did not contain enough content to identify the topic clearly."
+    return "The topic could not be determined from the available transcript text."
 
 
 def _build_key_concepts(passages: list[Passage], keywords: list[str]) -> list[str]:
@@ -153,13 +153,13 @@ def _build_key_concepts(passages: list[Passage], keywords: list[str]) -> list[st
     for passage in passages[:3]:
         concepts.append(passage.text)
     for keyword in keywords[:3]:
-        concepts.append(f"`{keyword}` is one of the repeated concepts anchoring the lesson.")
-    return concepts[:5] or ["No strong concepts could be extracted from the transcript."]
+        concepts.append(f"`{keyword}` appears repeatedly and likely marks a core concept.")
+    return concepts[:5] or ["No clear core concepts could be extracted from the transcript."]
 
 
 def _build_important_details(passages: list[Passage]) -> list[str]:
     if not passages:
-        return ["The transcript did not contain enough detail for reliable study notes."]
+        return ["There was not enough transcript detail to produce reliable notes."]
     details: list[str] = []
     for passage in passages[:4]:
         details.append(passage.text)
@@ -169,9 +169,9 @@ def _build_important_details(passages: list[Passage]) -> list[str]:
 def _build_overview(passages: list[Passage]) -> str:
     selected = [passage.text.rstrip(".") for passage in passages[:2]]
     if not selected:
-        return "The video contains too little transcript text for a reliable overview."
+        return "There is too little transcript content to build a reliable overview."
     if len(selected) == 1:
-        return f"The main idea is: {selected[0]}."
+        return selected[0]
     return f"{selected[0]}. {selected[1]}."
 
 
@@ -185,14 +185,14 @@ def _motivational_takeaways(keywords: list[str]) -> list[str]:
 
 
 def _build_main_ideas(passages: list[Passage]) -> list[str]:
-    return [passage.text for passage in passages[:4]] or ["The transcript did not contain enough material to identify the main ideas."]
+    return [passage.text for passage in passages[:4]] or ["There was not enough transcript content to identify the main ideas."]
 
 
 def _build_step_breakdown(bundle: TranscriptBundle, passages: list[Passage]) -> list[str]:
     steps: list[str] = []
     for passage in passages[:4]:
         steps.append(f"[{format_seconds(passage.start)}]({timestamp_url(bundle.video_id, passage.start)}) {passage.text}")
-    return steps or ["The transcript did not provide enough sequential detail to map the breakdown."]
+    return steps or ["The transcript did not provide enough sequence detail for a step breakdown."]
 
 
 def _build_important_examples(bundle: TranscriptBundle, passages: list[Passage]) -> list[str]:
@@ -207,21 +207,21 @@ def _build_important_examples(bundle: TranscriptBundle, passages: list[Passage])
             examples.append(
                 f"[{format_seconds(passage.start)}]({timestamp_url(bundle.video_id, passage.start)}) {passage.text}"
             )
-    return examples[:3] or ["No clear standalone examples appeared in the transcript."]
+    return examples[:3] or ["No clear standalone examples were found in the transcript."]
 
 
 def _build_common_mistakes(passages: list[Passage], keywords: list[str]) -> list[str]:
     if not passages:
-        return ["No reliable misconceptions could be inferred from the transcript."]
+        return ["No reliable misconceptions could be inferred from the transcript content."]
 
     anchors = keywords[:3] or ["main idea", "sequence", "example"]
     mistakes = [
-        f"Do not confuse the main point with side comments or repeated phrasing around `{anchors[0]}`.",
-        f"Avoid skipping the sequence of ideas, especially around `{anchors[1]}`.",
-        f"Do not treat a single example involving `{anchors[2]}` as the whole concept.",
+        f"Do not mistake side remarks for the main claim around `{anchors[0]}`.",
+        f"Do not skip the order of ideas, especially where `{anchors[1]}` appears.",
+        f"Do not treat one example containing `{anchors[2]}` as the full concept.",
     ]
     if any("not" in passage.text.lower() or "avoid" in passage.text.lower() for passage in passages):
-        mistakes.append("Pay attention to places where the speaker explicitly warns against an approach or misunderstanding.")
+        mistakes.append("Watch for points where the speaker explicitly warns against a specific approach.")
     return mistakes[:4]
 
 
@@ -235,35 +235,35 @@ def _build_practical_takeaways(
     if content_style == "tutorial":
         anchors = keywords[:3] or ["setup", "build", "review"]
         return [
-            f"Use `{anchors[0]}` as the first checkpoint before moving to later steps.",
-            f"Treat `{anchors[1]}` as a core implementation theme to revisit while practicing.",
-            f"Review `{anchors[2]}` after finishing the process so the sequence stays clear.",
+            f"Use `{anchors[0]}` as an early checkpoint before moving forward.",
+            f"Revisit `{anchors[1]}` when practicing to reinforce implementation choices.",
+            f"Review `{anchors[2]}` at the end to lock in the full sequence.",
         ]
     anchors = keywords[:3] or ["main idea", "example", "sequence"]
     takeaways = [
-        f"Remember `{anchors[0]}` as one of the core concepts repeated across the transcript.",
+        f"Treat `{anchors[0]}` as one of the key recurring concepts.",
         f"Use `{anchors[1]}` to explain the topic back in your own words.",
-        f"Preserve the sequence around `{anchors[2]}` when reviewing the lesson.",
+        f"Keep the sequence around `{anchors[2]}` intact during review.",
     ]
     if passages:
-        takeaways.append(f"Revisit the early explanation first, then follow the later supporting details in order.")
+        takeaways.append("Review the opening explanation first, then the later supporting details in order.")
     return takeaways[:4]
 
 
 def _build_what_to_remember(passages: list[Passage], keywords: list[str]) -> list[str]:
     reminders: list[str] = []
     if passages:
-        reminders.append("Keep the speaker's original sequence in mind when revising the topic.")
+        reminders.append("Keep the speaker's original sequence when revising this topic.")
         reminders.append(passages[0].text)
     for keyword in keywords[:3]:
-        reminders.append(f"Remember `{keyword}` as one of the key anchors in the transcript.")
-    return reminders[:5] or ["Remember the core topic and the order in which the explanation develops."]
+        reminders.append(f"Remember `{keyword}` as a recurring anchor in the transcript.")
+    return reminders[:5] or ["Remember the core topic and the order used to develop it."]
 
 
 def _build_compressed_paragraph(passages: list[Passage]) -> str:
     text = " ".join(passage.text.rstrip(".") for passage in passages[:3]).strip()
     if not text:
-        return "The transcript was too short to compress into a reliable paragraph."
+        return "The transcript was too short to produce a reliable compressed paragraph."
     return f"{text}."
 
 
@@ -306,7 +306,7 @@ def _build_quiz(
 ) -> str:
     lines = ["## Quiz"]
     if not passages:
-        lines.append("The transcript was too short to generate a reliable quiz.")
+        lines.append("The transcript was too short to generate a reliable quiz set.")
         return "\n".join(lines)
 
     fallback_pool = keywords or [token for token in tokenize(bundle.transcript_text) if len(token) >= 4][:12]
@@ -357,7 +357,7 @@ def _build_multiple_choice_questions(
             block.append(f"{'ABCD'[option_index]}. {option}")
         block.append(f"Answer: {answer_letter}. {answer}")
         block.append(
-            f"Explanation: Around {format_seconds(passage.start)}, the transcript directly centers on `{answer}`, which makes it the best supported answer."
+            f"Explanation: Around {format_seconds(passage.start)}, the transcript focuses most directly on `{answer}`."
         )
         questions.append(block)
     return questions
@@ -377,27 +377,27 @@ def _build_short_answer_questions(
         (
             "11. [easy] What is the main topic of the transcript?",
             _build_topic(bundle, passages),
-            "The title/opening of the transcript identifies this as the central subject.",
+            "This is stated in the title or the opening transcript lines.",
         ),
         (
             f"12. [medium] Name one key concept the speaker emphasizes.",
             anchors[0],
-            f"`{anchors[0]}` appears repeatedly and acts as one of the main anchors of the transcript.",
+            f"`{anchors[0]}` appears repeatedly and functions as a core concept.",
         ),
         (
             f"13. [medium] What important detail does the speaker give about the topic?",
             details[0].text if details else _build_topic(bundle, passages),
-            "This detail is stated directly in one of the early high-signal transcript passages.",
+            "This detail is stated directly in the early transcript content.",
         ),
         (
             "14. [hard] How does the transcript progress from the opening idea to later points?",
             compressed,
-            "This answer preserves the sequence of the strongest early-to-mid transcript points.",
+            "This keeps the original sequence from opening idea to later supporting points.",
         ),
         (
             "15. [hard] What is one mistake or misconception a learner should avoid?",
             misconceptions[0],
-            "This is supported by the transcript's emphasis and by the way the explanation frames the topic.",
+            "This follows the transcript's emphasis and framing.",
         ),
     ]
 
@@ -422,17 +422,17 @@ def _build_application_questions(
             (
                 "16. [medium] If you were following this process yourself, what should you focus on first?",
                 first_step,
-                "The earliest step in the transcript is the safest first action because the speaker presents it before later stages.",
+                "The first explicit step is the correct place to begin before later stages.",
             ),
             (
                 "17. [hard] If you got stuck halfway through, how would the transcript suggest getting back on track?",
                 later_step,
-                "The transcript gives a clear sequence, so returning to the next major step is the most supported move.",
+                "Because the transcript is sequential, returning to the next major step is the strongest move.",
             ),
             (
                 "18. [hard] How could you apply the same method to a similar project?",
                 f"Reuse the sequence built around `{anchors[0]}` and keep the same overall order of steps.",
-                "The transcript emphasizes the method and ordering more than a one-off isolated detail.",
+                "The transcript emphasizes method and ordering, not one isolated detail.",
             ),
         ]
     elif content_style == "motivational":
@@ -440,17 +440,17 @@ def _build_application_questions(
             (
                 "16. [medium] If someone wanted to apply the message of the transcript this week, what should they start with?",
                 f"Start with the principle around `{anchors[0]}` and turn it into one repeatable action.",
-                "The transcript frames this idea as a practical anchor rather than just an abstract slogan.",
+                "The transcript presents this as a practical anchor, not just a slogan.",
             ),
             (
                 "17. [hard] How would you use the transcript's mindset advice when motivation is low?",
                 f"Return to the lesson around `{anchors[1]}` and use it as the first mental reset before taking action.",
-                "This follows the transcript's emphasis on principle-first action.",
+                "This follows the transcript's principle-first approach to action.",
             ),
             (
                 "18. [hard] How could you explain the transcript's message to a friend in a real-life situation?",
                 f"Use `{anchors[2]}` as the key principle and connect it to the transcript's practical lesson.",
-                "The transcript's strongest motivational value comes from applying the principle, not repeating the wording.",
+                "The transcript's value is in applying the principle, not repeating the phrasing.",
             ),
         ]
     else:
@@ -458,7 +458,7 @@ def _build_application_questions(
             (
                 "16. [medium] If you had to teach this topic to a beginner, what would you explain first?",
                 first_step,
-                "The transcript introduces this point early, which makes it the most grounded place to begin.",
+                "The transcript introduces this point early, so it is the most grounded starting point.",
             ),
             (
                 "17. [hard] If you were reviewing this topic under time pressure, what idea would you prioritize?",
@@ -468,7 +468,7 @@ def _build_application_questions(
             (
                 "18. [hard] How would you apply one principle from the transcript to a related example?",
                 f"Apply the sequence or concept around `{anchors[1]}` and keep the same logic used by the speaker.",
-                "This stays answerable from the transcript because it uses the speaker's own framework or sequence.",
+                "This remains transcript-grounded because it follows the speaker's framework or sequence.",
             ),
         ]
 

@@ -1,41 +1,29 @@
 # YouTube Study Lab
 
-YouTube Study Lab turns a YouTube video into a study pack:
+YouTube Study Lab converts a captioned YouTube video into a revision pack:
 
-- extracts the transcript
-- summarizes the content
-- generates study notes
-- generates quizzes
+- transcript
+- structured summary
+- study notes
+- quiz set
+- transcript classification
 
-It is built for people who want to turn long YouTube videos into something they can review, revise, and apply quickly.
+It is built for students who want faster review loops from long-form videos.
 
-## What it produces
+## Features
 
-For each supported video, the app can generate:
+- Dual transcript ingestion:
+  - primary: `youtube-transcript-api`
+  - fallback: `yt-dlp` caption track parsing
+- Transcript classification (`tutorial`, `lecture`, `motivational`, `interview`, `commentary`, `storytelling`, `coding walkthrough`)
+- Multi-provider generation from env config:
+  - `heuristic` (local no-API mode)
+  - `openai`
+  - `azure_openai`
+  - `gemini`
+- Downloadable transcript and full study pack markdown
 
-- a structured summary
-- revision-friendly study notes
-- a mixed-difficulty quiz
-- transcript-based video classification
-
-The generator adapts to video type, including:
-
-- tutorial
-- lecture
-- motivational
-- interview
-- commentary
-- storytelling
-- coding walkthrough
-
-The app supports four generation modes from one `.env` file:
-
-- `heuristic`: no API calls, local summaries/notes/quizzes
-- `openai`: OpenAI Responses API
-- `azure_openai`: Azure OpenAI via the OpenAI-compatible endpoint
-- `gemini`: Google Gemini via the official `google-genai` SDK
-
-## Stack
+## Tech Stack
 
 - Python 3.12
 - Streamlit
@@ -43,21 +31,18 @@ The app supports four generation modes from one `.env` file:
 - `yt-dlp`
 - OpenAI Python SDK
 - Google GenAI SDK
+- pytest
 
-## How it works
+## Processing Flow
 
-1. Paste a YouTube URL with captions enabled.
-2. The app extracts the transcript from YouTube.
-   If the primary transcript backend is blocked by YouTube, the app falls back to caption extraction through `yt-dlp`.
-3. It classifies the transcript by video type.
-4. It compresses long transcript context when needed.
-5. It generates:
-   - a detailed summary
-   - study notes
-   - quizzes
-6. You can download the transcript or the complete study pack.
+1. Parse URL or video ID.
+2. Fetch transcript via primary backend; fallback to `yt-dlp` when needed.
+3. Classify transcript type.
+4. Chunk long transcripts for stable generation.
+5. Generate `Summary`, `Study Notes`, and `Quiz`.
+6. Render and export outputs.
 
-## Run locally
+## Local Setup
 
 ```powershell
 python -m venv .venv
@@ -67,28 +52,16 @@ copy .env.example .env
 streamlit run app.py
 ```
 
-## Provider setup
+## Provider Configuration
 
-Provider selection now lives entirely in `.env`. In normal use, you only change `LLM_PROVIDER`, and optionally `LLM_MODEL` if you want to override the provider-specific default.
+All provider settings are env-driven.
 
 ```env
 LLM_PROVIDER=heuristic
 LLM_MODEL=
-```
-
-You can also tune how the summary behaves:
-
-```env
 SUMMARY_STYLE=adaptive
 SUMMARY_DETAIL=balanced
 ```
-
-- `SUMMARY_STYLE=adaptive` lets the app shape the summary around the video itself.
-- `SUMMARY_STYLE=tutorial` is useful when you mostly summarize build/process/how-to videos.
-- `SUMMARY_STYLE=motivational` is useful when you want the output to focus on core message and practical mindset shifts.
-- `SUMMARY_DETAIL=concise` gives a tight TL;DR.
-- `SUMMARY_DETAIL=balanced` keeps the best signal without feeling too compressed.
-- `SUMMARY_DETAIL=deep` gives a fuller summary without turning into a line-by-line retelling.
 
 ### OpenAI
 
@@ -100,8 +73,6 @@ OPENAI_MODEL=gpt-4o-mini
 ```
 
 ### Azure OpenAI
-
-`AZURE_OPENAI_DEPLOYMENT` should be your Azure deployment name.
 
 ```env
 LLM_PROVIDER=azure_openai
@@ -120,98 +91,44 @@ GEMINI_API_KEY=your_gemini_key_here
 GEMINI_MODEL=gemini-2.5-flash
 ```
 
-## Output format
+## Output Shape
 
-### Summary
-
-The summary is generated in this structure:
-
-1. Overview
-2. Main ideas
-3. Step-by-step breakdown
-4. Important examples
-5. Practical takeaways
-6. One-paragraph compressed version
-
-### Study notes
-
-The study notes are generated in this structure:
-
-1. Topic
-2. Key concepts
-3. Important details
-4. Examples
-5. Common mistakes or misconceptions
-6. What to remember
-
-### Quiz
-
-The quiz is generated in this structure:
-
-- 10 multiple-choice questions
-- 5 short-answer questions
-- 3 application-based questions
-- answer and explanation for every question
-- mixed difficulty: easy, medium, hard
-
-## Example output
-
-Example summary shape:
-
-```md
-## Summary
-### 1. Overview
-This video explains the main topic and why it matters.
-
-### 2. Main ideas
-- Core idea one
-- Core idea two
-
-### 3. Step-by-step breakdown
-- Step 1
-- Step 2
-
-### 4. Important examples
-- Example from the transcript
-
-### 5. Practical takeaways
-- Actionable lesson
-
-### 6. One-paragraph compressed version
-A compact revision-ready version of the transcript.
-```
-
-Example quiz item shape:
-
-```md
-1. [medium] Which concept best matches the transcript segment?
-A. Option one
-B. Option two
-C. Option three
-D. Option four
-Answer: B. Option two
-Explanation: This is the best answer because the transcript explicitly supports it.
-```
+- Summary:
+  - Overview
+  - Main ideas
+  - Step-by-step breakdown
+  - Important examples
+  - Practical takeaways
+  - One-paragraph compressed version
+- Study notes:
+  - Topic
+  - Key concepts
+  - Important details
+  - Examples
+  - Common mistakes or misconceptions
+  - What to remember
+- Quiz:
+  - 10 multiple-choice
+  - 5 short-answer
+  - 3 application-based
+  - answer + explanation per question
 
 ## Notes
 
-- Transcript extraction depends on captions being available for the video.
-- Some YouTube videos block transcript access entirely.
-- The app now has a secondary transcript fallback path via `yt-dlp`, which helps with some YouTube IP-block cases.
-- If the selected provider is misconfigured, the app falls back to heuristic mode automatically.
-- `LLM_MODEL` is optional. If left blank, the app uses `OPENAI_MODEL`, `AZURE_OPENAI_DEPLOYMENT`, or `GEMINI_MODEL` depending on `LLM_PROVIDER`.
-- The summary is now content-aware: tutorial/build videos get step-oriented summaries, while motivational videos get message-and-action oriented summaries.
+- Captions must exist on the target video.
+- Some videos block transcript access entirely.
+- Provider misconfiguration automatically falls back to heuristic mode.
+
+## Testing
+
+```powershell
+.\.venv\Scripts\python -m pytest tests -q
+```
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, testing, and pull request guidance.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE).
-
-## Tests
-
-```powershell
-.\.venv\Scripts\python -m pytest
-```
+MIT. See [LICENSE](LICENSE).

@@ -46,3 +46,15 @@ def test_summary_settings_normalize_invalid_values(monkeypatch) -> None:
 
     assert settings.summary_style == "adaptive"
     assert settings.summary_detail == "balanced"
+
+
+def test_generation_values_are_clamped(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_TEMPERATURE", "9")
+    monkeypatch.setenv("LLM_CHUNK_MAX_OUTPUT_TOKENS", "1")
+    monkeypatch.setenv("LLM_FINAL_MAX_OUTPUT_TOKENS", "999999")
+
+    settings = load_settings()
+
+    assert settings.temperature == 2.0
+    assert settings.chunk_max_output_tokens == 64
+    assert settings.final_max_output_tokens == 16000

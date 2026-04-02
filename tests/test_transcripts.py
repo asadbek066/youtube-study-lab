@@ -13,6 +13,10 @@ def test_normalize_languages_defaults_to_english() -> None:
     assert normalize_languages("") == ("en", "en-US", "en-GB")
 
 
+def test_normalize_languages_filters_invalid_and_dedupes() -> None:
+    assert normalize_languages("en,en,  ,xx_yy,uz,EN") == ("en", "uz")
+
+
 def test_download_caption_segments_parses_json3_payload(monkeypatch) -> None:
     class DummyResponse:
         def raise_for_status(self) -> None:

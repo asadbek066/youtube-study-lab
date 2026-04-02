@@ -116,7 +116,7 @@ def render_hero() -> None:
         <section class="hero">
             <div class="hero-kicker">Transcript -> Summary -> Notes -> Quiz</div>
             <h1>YouTube Study Lab</h1>
-            <p>Paste any YouTube link with captions and turn it into a study pack. The app extracts the transcript, builds a concise summary, turns the lesson into notes, and creates quiz questions for review.</p>
+            <p>Drop in a captioned YouTube link and get a review-ready study pack. The app pulls transcript text, keeps the high-signal ideas, and outputs notes and quiz prompts you can actually revise with.</p>
         </section>
         """,
         unsafe_allow_html=True,
@@ -198,7 +198,7 @@ def run() -> None:
     with st.sidebar:
         st.header("Options")
         language_input = st.text_input("Preferred transcript languages", value="en,en-US,en-GB")
-        st.caption("LLM provider and model are controlled from `.env`.")
+        st.caption("Provider and model are controlled via `.env`.")
         if generator.is_ready:
             st.success(generator.status_message)
         else:
@@ -211,7 +211,7 @@ def run() -> None:
         )
 
         st.caption(
-            "Some videos do not expose captions publicly. In those cases YouTube may block transcript extraction."
+            "If a video does not expose captions publicly, transcript retrieval may fail."
         )
 
     with st.form("analyze-form"):
@@ -239,7 +239,7 @@ def run() -> None:
             st.error(f"Transcript extraction failed: {error}")
             return
         except Exception as error:
-            st.error(f"Something unexpected happened: {error}")
+            st.error(f"Unexpected error: {error}")
             return
 
         st.session_state["transcript_bundle"] = transcript
@@ -250,11 +250,11 @@ def run() -> None:
     if not transcript_bundle or not analysis_bundle:
         st.markdown(
             """
-            ### What this tool does
-            - Extracts the transcript from a YouTube video with captions
-            - Produces a high-signal summary
-            - Turns the lesson into study notes
-            - Generates a review quiz you can use for active recall
+            ### What this app does
+            - Pulls transcript text from captioned YouTube videos
+            - Builds a structured summary for fast review
+            - Generates study notes for revision
+            - Creates quiz questions for active recall
             """
         )
         return
