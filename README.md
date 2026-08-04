@@ -44,13 +44,27 @@ It is built for students who want faster review loops from long-form videos.
 
 ## Local Setup
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\activate
+### Linux and macOS
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-copy .env.example .env
+cp .env.example .env
 streamlit run app.py
 ```
+
+### Windows PowerShell
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+streamlit run app.py
+```
+
+The default `heuristic` provider works without an API key. Open the local URL printed by Streamlit, paste a captioned YouTube URL, and generate a study pack.
 
 ## Provider Configuration
 
