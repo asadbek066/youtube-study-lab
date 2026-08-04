@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a focused improvement to the learning workflow
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    attributes:
+      label: Problem
+      description: What learning or developer problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed solution
+      description: Describe the smallest useful version of the feature.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Alternatives considered
+      description: What other approaches or workarounds did you try?
+  - type: checkboxes
+    attributes:
+      label: Contribution
+      options:
+        - label: I would be interested in implementing this after the approach is agreed.

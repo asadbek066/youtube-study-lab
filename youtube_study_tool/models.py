@@ -26,6 +26,7 @@ class TranscriptBundle:
     duration_seconds: float
     word_count: int
     video_title: str | None = None
+    source_label: str = ""
 
 
 @dataclass(frozen=True)

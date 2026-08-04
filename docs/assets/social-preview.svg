@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">YouTube Study Lab</title>
+  <desc id="desc">Turn captioned videos into summaries, notes, and active-recall quizzes.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff4df"/>
+      <stop offset=".52" stop-color="#f5efe4"/>
+      <stop offset="1" stop-color="#e3f1e8"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#d46b3d"/>
+      <stop offset="1" stop-color="#ad4f2c"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#443126" flood-opacity=".14"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#background)"/>
+  <circle cx="1170" cy="80" r="180" fill="#b9decf" opacity=".35"/>
+  <circle cx="70" cy="600" r="210" fill="#f7c995" opacity=".35"/>
+
+  <g transform="translate(72 70)">
+    <rect width="1136" height="500" rx="36" fill="#fff" fill-opacity=".82" stroke="#17222d" stroke-opacity=".08" filter="url(#shadow)"/>
+
+    <g transform="translate(46 42)">
+      <rect width="242" height="38" rx="19" fill="#f4d0af"/>
+      <circle cx="22" cy="19" r="6" fill="#c96a3f"/>
+      <text x="39" y="25" fill="#17222d" font-family="Inter,Arial,sans-serif" font-size="15" font-weight="700">One link. Complete revision.</text>
+    </g>
+
+    <text x="48" y="153" fill="#17222d" font-family="Inter,Arial,sans-serif" font-size="58" font-weight="800" letter-spacing="-2">YouTube Study Lab</text>
+    <text x="50" y="205" fill="#44515d" font-family="Georgia,serif" font-size="25">Turn captioned videos into summaries,</text>
+    <text x="50" y="240" fill="#44515d" font-family="Georgia,serif" font-size="25">revision notes, and active-recall quizzes.</text>
+
+    <g transform="translate(48 278)" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="700">
+      <rect width="168" height="42" rx="21" fill="#f4f3ef" stroke="#17222d" stroke-opacity=".14"/>
+      <text x="84" y="27" text-anchor="middle" fill="#17222d">No API key required</text>
+      <rect x="180" width="170" height="42" rx="21" fill="#f4f3ef" stroke="#17222d" stroke-opacity=".14"/>
+      <text x="265" y="27" text-anchor="middle" fill="#17222d">Timestamped sources</text>
+      <rect x="362" width="142" height="42" rx="21" fill="#f4f3ef" stroke="#17222d" stroke-opacity=".14"/>
+      <text x="433" y="27" text-anchor="middle" fill="#17222d">Markdown export</text>
+    </g>
+
+    <g transform="translate(48 351)">
+      <rect width="360" height="72" rx="16" fill="url(#accent)"/>
+      <text x="180" y="44" text-anchor="middle" fill="#fff" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="800">Transcript → Study pack</text>
+    </g>
+
+    <!-- product cards -->
+    <g transform="translate(690 62) rotate(-4 170 180)" filter="url(#shadow)">
+      <rect width="330" height="370" rx="25" fill="#fbfaf7" stroke="#17222d" stroke-opacity=".1"/>
+      <rect x="26" y="28" width="92" height="28" rx="14" fill="#f4d0af"/>
+      <text x="72" y="47" text-anchor="middle" fill="#8e4428" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="800">SUMMARY</text>
+      <text x="26" y="97" fill="#17222d" font-family="Inter,Arial,sans-serif" font-size="24" font-weight="800">High-signal overview</text>
+      <rect x="26" y="126" width="276" height="12" rx="6" fill="#dbe6e0"/>
+      <rect x="26" y="150" width="240" height="12" rx="6" fill="#e8e3d9"/>
+      <rect x="26" y="174" width="266" height="12" rx="6" fill="#e8e3d9"/>
+      <text x="26" y="227" fill="#c96a3f" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="800">00:00</text>
+      <rect x="82" y="216" width="198" height="11" rx="5" fill="#d9d5cd"/>
+      <text x="26" y="268" fill="#c96a3f" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="800">01:04</text>
+      <rect x="82" y="257" width="172" height="11" rx="5" fill="#d9d5cd"/>
+      <rect x="26" y="315" width="132" height="28" rx="14" fill="#e5f2eb"/>
+      <text x="92" y="334" text-anchor="middle" fill="#226246" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="700">18-question quiz</text>
+    </g>
+
+    <g transform="translate(958 245) rotate(7 72 90)" filter="url(#shadow)">
+      <rect width="145" height="190" rx="20" fill="#17222d"/>
+      <text x="22" y="42" fill="#f4d0af" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="800">EXPORT</text>
+      <text x="22" y="78" fill="#fff" font-family="Inter,Arial,sans-serif" font-size="21" font-weight="800">Study</text>
+      <text x="22" y="103" fill="#fff" font-family="Inter,Arial,sans-serif" font-size="21" font-weight="800">pack.md</text>
+      <path d="M25 141H119" stroke="#64748b" stroke-width="2"/>
+      <path d="M25 157H96" stroke="#64748b" stroke-width="2"/>
+    </g>
+  </g>
+
+  <text x="74" y="615" fill="#6b7280" font-family="Inter,Arial,sans-serif" font-size="14">Open source • Python • Streamlit • Local-first fallback</text>
+</svg>
