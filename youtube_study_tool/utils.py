@@ -5,6 +5,7 @@ import random
 import re
 from collections import Counter
 from dataclasses import dataclass
+from html import escape
 from typing import Iterable, Sequence
 
 from youtube_study_tool.models import TranscriptSegment
@@ -172,6 +173,17 @@ def timestamp_url(video_id: str, start_seconds: float) -> str:
     return f"https://www.youtube.com/watch?v={video_id}&t={seconds}s"
 
 
+def timestamp_reference(video_id: str, start_seconds: float, *, linked: bool = True) -> str:
+    label = format_seconds(start_seconds)
+    if not linked:
+        return label
+    return f"[{label}]({timestamp_url(video_id, start_seconds)})"
+
+
+def escape_html_text(value: object) -> str:
+    return escape(str(value), quote=True)
+
+
 def clean_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
@@ -249,13 +261,16 @@ def select_key_passages(passages: Sequence[Passage], limit: int = 5) -> list[Pas
 def build_chunked_text(
     segments: Sequence[TranscriptSegment],
     max_chars: int = 10000,
+    *,
+    include_timestamps: bool = True,
 ) -> list[str]:
     chunks: list[str] = []
     current_lines: list[str] = []
     current_length = 0
 
     for segment in segments:
-        line = f"[{format_seconds(segment.start)}] {clean_whitespace(segment.text)}"
+        text = clean_whitespace(segment.text)
+        line = f"[{format_seconds(segment.start)}] {text}" if include_timestamps else text
         if current_lines and current_length + len(line) + 1 > max_chars:
             chunks.append("\n".join(current_lines))
             current_lines = []

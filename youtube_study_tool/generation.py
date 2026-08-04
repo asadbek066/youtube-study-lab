@@ -118,11 +118,16 @@ class StudyPackGenerator:
         source_text = "\n\n".join(
             f"Excerpt {index + 1} summary:\n{summary}" for index, summary in enumerate(chunk_summaries)
         )
+        metadata_lines = [
+            f"Video title: {bundle.video_title or 'Unknown'}",
+            f"Transcript length: {bundle.word_count} words",
+        ]
+        if bundle.duration_seconds > 0:
+            metadata_lines.append(f"Approximate duration: {format_seconds(bundle.duration_seconds)}")
+        metadata_text = "\n".join(metadata_lines)
         response_text = self._complete(
             prompt=(
-                f"Video title: {bundle.video_title or 'Unknown'}\n"
-                f"Transcript length: {bundle.word_count} words\n"
-                f"Approximate duration: {format_seconds(bundle.duration_seconds)}\n\n"
+                f"{metadata_text}\n\n"
                 f"Classifier result:\n{json.dumps(_classification_to_dict(classification), ensure_ascii=True)}\n\n"
                 f"{source_text}"
             ),
@@ -158,7 +163,10 @@ class StudyPackGenerator:
             return heuristic_classification(bundle)
 
     def _chunk_summaries(self, bundle: TranscriptBundle) -> list[str]:
-        chunks = build_chunked_text(bundle.segments)
+        chunks = build_chunked_text(
+            bundle.segments,
+            include_timestamps=bundle.duration_seconds > 0,
+        )
         if len(chunks) == 1:
             return [
                 self._complete(

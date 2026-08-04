@@ -11,7 +11,7 @@ from youtube_study_tool.utils import (
     pick_keyword_candidates,
     select_key_passages,
     stable_shuffle,
-    timestamp_url,
+    timestamp_reference,
     tokenize,
 )
 
@@ -191,7 +191,16 @@ def _build_main_ideas(passages: list[Passage]) -> list[str]:
 def _build_step_breakdown(bundle: TranscriptBundle, passages: list[Passage]) -> list[str]:
     steps: list[str] = []
     for passage in passages[:4]:
-        steps.append(f"[{format_seconds(passage.start)}]({timestamp_url(bundle.video_id, passage.start)}) {passage.text}")
+        reference = (
+            timestamp_reference(
+                bundle.video_id,
+                passage.start,
+                linked=bool(bundle.source_url),
+            )
+            if bundle.duration_seconds > 0
+            else ""
+        )
+        steps.append(f"{reference} {passage.text}".strip())
     return steps or ["The transcript did not provide enough sequence detail for a step breakdown."]
 
 
@@ -204,9 +213,16 @@ def _build_important_examples(bundle: TranscriptBundle, passages: list[Passage])
             examples.append(passage.text)
     if not examples:
         for passage in passages[1:3]:
-            examples.append(
-                f"[{format_seconds(passage.start)}]({timestamp_url(bundle.video_id, passage.start)}) {passage.text}"
+            reference = (
+                timestamp_reference(
+                    bundle.video_id,
+                    passage.start,
+                    linked=bool(bundle.source_url),
+                )
+                if bundle.duration_seconds > 0
+                else ""
             )
+            examples.append(f"{reference} {passage.text}".strip())
     return examples[:3] or ["No clear standalone examples were found in the transcript."]
 
 
@@ -349,16 +365,23 @@ def _build_multiple_choice_questions(
             stem = passage.text
             prompt = f"{question_number}. [{difficulty}] Which concept is emphasized in this transcript segment?"
         else:
-            stem = f"Focus segment at {format_seconds(passage.start)}: {passage.text}"
+            stem = (
+                f"Focus segment at {format_seconds(passage.start)}: {passage.text}"
+                if bundle.duration_seconds > 0
+                else f"Focus transcript segment: {passage.text}"
+            )
             prompt = f"{question_number}. [{difficulty}] Which keyword best matches the main focus here?"
 
         block = [prompt, stem]
         for option_index, option in enumerate(options):
             block.append(f"{'ABCD'[option_index]}. {option}")
         block.append(f"Answer: {answer_letter}. {answer}")
-        block.append(
-            f"Explanation: Around {format_seconds(passage.start)}, the transcript focuses most directly on `{answer}`."
+        explanation = (
+            f"Around {format_seconds(passage.start)}, the transcript focuses most directly on `{answer}`."
+            if bundle.duration_seconds > 0
+            else f"The transcript focuses most directly on `{answer}` in this segment."
         )
+        block.append(f"Explanation: {explanation}")
         questions.append(block)
     return questions
 
