@@ -8,14 +8,21 @@
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-app-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Live Demo](https://img.shields.io/badge/Live_Demo-Open_App-EA580C?logo=streamlit&logoColor=white)](https://yowassup.streamlit.app/)
 
 **No API key required · Hosted-server fallback · 18-question quiz · Markdown export**
+
+### [Open the live app →](https://yowassup.streamlit.app/)
 
 </div>
 
 ![YouTube Study Lab instant-demo walkthrough](docs/assets/demo.gif)
 
 ## Try it in 30 seconds
+
+Open the **[live app](https://yowassup.streamlit.app/)** and click **See a complete study pack instantly**. The built-in demo uses an original sample transcript and local generation, so it makes no YouTube or model-provider request.
+
+To run it locally instead:
 
 ```bash
 git clone https://github.com/asadbek066/youtube-study-lab.git
@@ -52,7 +59,7 @@ python -m pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Open the local URL and click **See a complete study pack instantly**. The built-in demo uses an original sample transcript and local generation, so it makes no YouTube or model-provider request.
+Open the local URL and use the same instant-demo flow.
 
 ## What you get
 

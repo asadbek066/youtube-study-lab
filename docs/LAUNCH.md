@@ -1,6 +1,6 @@
 # Launch Runbook
 
-Do not publish these drafts until the live demo URL is verified end-to-end. Replace `[DEMO_URL]` everywhere and tailor community posts to each community's rules.
+The live demo at https://yowassup.streamlit.app/ was verified end-to-end with the built-in sample, pasted transcript, and a real captioned YouTube video. Tailor community posts to each community's rules.
 
 ## Preflight
 
@@ -18,7 +18,7 @@ Do not publish these drafts until the live demo URL is verified end-to-end. Repl
 
 I built YouTube Study Lab, an open-source Streamlit app that turns captioned YouTube videos into summaries, revision notes, quizzes, video-type classification, and a downloadable Markdown study pack.
 
-Demo: [DEMO_URL]
+Demo: https://yowassup.streamlit.app/
 Code: https://github.com/asadbek066/youtube-study-lab
 
 ### 2/5
@@ -63,7 +63,7 @@ It runs without an API key in local heuristic mode, and the built-in instant dem
 
 There are honest limits: the source video must expose captions, and YouTube may block transcript retrieval from hosted environments. The app uses `youtube-transcript-api` first and `yt-dlp` caption tracks as a fallback.
 
-Demo: [DEMO_URL]
+Demo: https://yowassup.streamlit.app/
 Repository: https://github.com/asadbek066/youtube-study-lab
 
 The project is MIT licensed. Practical bug reports and focused contributions are welcome.
@@ -80,7 +80,7 @@ The default heuristic mode runs without an API key, and the built-in instant dem
 
 The transcript pipeline uses `youtube-transcript-api`, with `yt-dlp` caption tracks as a fallback. It still depends on the video exposing public captions, and YouTube may block transcript access from some hosted environments.
 
-Demo: [DEMO_URL]
+Demo: https://yowassup.streamlit.app/
 Source: https://github.com/asadbek066/youtube-study-lab
 
 I would especially value feedback on transcript reliability, output structure, and useful export formats.
@@ -103,7 +103,7 @@ Technical details:
 
 It only works when captions are publicly accessible, and YouTube may block transcript retrieval from some hosted environments.
 
-Demo: [DEMO_URL]
+Demo: https://yowassup.streamlit.app/
 Source: https://github.com/asadbek066/youtube-study-lab
 
 I am sharing it in case it is useful to students or developers working on transcript tools. Technical criticism and reproducible bug reports are welcome.
