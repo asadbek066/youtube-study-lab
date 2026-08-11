@@ -1,4 +1,4 @@
-streamlit==1.60.0
+streamlit==1.61.1
 youtube-transcript-api==1.2.4
 openai==2.52.0
 python-dotenv==1.2.2
