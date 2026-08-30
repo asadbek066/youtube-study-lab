@@ -1,19 +1,26 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+import logging
 import re
 import time
+from collections.abc import Iterable
 from urllib.parse import parse_qs, urlparse
 
 import requests
 import yt_dlp
-from youtube_transcript_api import NoTranscriptFound, Transcript, TranscriptList, YouTubeTranscriptApi
+from youtube_transcript_api import (
+    NoTranscriptFound,
+    Transcript,
+    TranscriptList,
+    YouTubeTranscriptApi,
+)
 
 from youtube_study_tool.models import TranscriptBundle, TranscriptSegment
 from youtube_study_tool.utils import clean_whitespace
 
 VIDEO_ID_LENGTH = 11
 LANGUAGE_CODE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
+logger = logging.getLogger(__name__)
 
 
 class TranscriptRetrievalError(Exception):
@@ -25,7 +32,9 @@ def extract_video_id(raw_value: str) -> str:
     if not candidate:
         raise ValueError("Enter a YouTube URL or a video ID.")
 
-    if len(candidate) == VIDEO_ID_LENGTH and all(char.isalnum() or char in "-_" for char in candidate):
+    if len(candidate) == VIDEO_ID_LENGTH and all(
+        char.isalnum() or char in "-_" for char in candidate
+    ):
         return candidate
 
     parsed = urlparse(candidate)
@@ -34,7 +43,9 @@ def extract_video_id(raw_value: str) -> str:
 
     if host in {"youtu.be", "www.youtu.be"} and path_parts:
         candidate_id = path_parts[0]
-        if len(candidate_id) == VIDEO_ID_LENGTH and all(char.isalnum() or char in "-_" for char in candidate_id):
+        if len(candidate_id) == VIDEO_ID_LENGTH and all(
+            char.isalnum() or char in "-_" for char in candidate_id
+        ):
             return candidate_id
 
     if host in {
@@ -47,13 +58,21 @@ def extract_video_id(raw_value: str) -> str:
     }:
         if parsed.path == "/watch":
             video_id = parse_qs(parsed.query).get("v", [None])[0]
-            if video_id and len(video_id) == VIDEO_ID_LENGTH and all(
-                char.isalnum() or char in "-_" for char in video_id
+            if (
+                video_id
+                and len(video_id) == VIDEO_ID_LENGTH
+                and all(char.isalnum() or char in "-_" for char in video_id)
             ):
                 return video_id
-        if path_parts and path_parts[0] in {"embed", "shorts", "live", "v"} and len(path_parts) > 1:
+        if (
+            path_parts
+            and path_parts[0] in {"embed", "shorts", "live", "v"}
+            and len(path_parts) > 1
+        ):
             candidate_id = path_parts[1]
-            if len(candidate_id) == VIDEO_ID_LENGTH and all(char.isalnum() or char in "-_" for char in candidate_id):
+            if len(candidate_id) == VIDEO_ID_LENGTH and all(
+                char.isalnum() or char in "-_" for char in candidate_id
+            ):
                 return candidate_id
 
     raise ValueError("That does not look like a valid YouTube URL or video ID.")
@@ -85,15 +104,23 @@ class TranscriptService:
     def __init__(self) -> None:
         self.api = YouTubeTranscriptApi()
 
-    def fetch(self, source: str, preferred_languages: Iterable[str]) -> TranscriptBundle:
+    def fetch(
+        self, source: str, preferred_languages: Iterable[str]
+    ) -> TranscriptBundle:
         video_id = extract_video_id(source)
         source_url = f"https://www.youtube.com/watch?v={video_id}"
-        languages = tuple(dict.fromkeys(language.strip() for language in preferred_languages if language.strip()))
+        languages = tuple(
+            dict.fromkeys(
+                language.strip() for language in preferred_languages if language.strip()
+            )
+        )
 
         primary_error: Exception | None = None
         try:
-            return self._fetch_with_youtube_transcript_api(video_id, source_url, languages)
-        except Exception as error:
+            return self._fetch_with_youtube_transcript_api(
+                video_id, source_url, languages
+            )
+        except Exception as error:  # noqa: BLE001 - either backend may fail with library-specific errors.
             primary_error = error
 
         try:
@@ -126,7 +153,9 @@ class TranscriptService:
         return TranscriptBundle(
             video_id=video_id,
             source_url=source_url,
-            transcript_text=clean_whitespace(" ".join(segment.text for segment in segments)),
+            transcript_text=clean_whitespace(
+                " ".join(segment.text for segment in segments)
+            ),
             segments=segments,
             language_code=getattr(transcript, "language_code", "unknown"),
             language_name=getattr(transcript, "language", "Unknown"),
@@ -151,7 +180,9 @@ class TranscriptService:
             preferred_languages,
         )
         segments = self._download_caption_segments(track["url"])
-        transcript_text = clean_whitespace(" ".join(segment.text for segment in segments))
+        transcript_text = clean_whitespace(
+            " ".join(segment.text for segment in segments)
+        )
         return TranscriptBundle(
             video_id=video_id,
             source_url=source_url,
@@ -162,7 +193,8 @@ class TranscriptService:
             is_generated=is_generated,
             duration_seconds=segments[-1].end if segments else 0.0,
             word_count=len(transcript_text.split()),
-            video_title=clean_whitespace(str(info.get("title") or "")) or self._fetch_video_title(source_url),
+            video_title=clean_whitespace(str(info.get("title") or ""))
+            or self._fetch_video_title(source_url),
         )
 
     def _select_transcript(
@@ -170,7 +202,11 @@ class TranscriptService:
         transcript_list: TranscriptList,
         preferred_languages: Iterable[str],
     ) -> Transcript:
-        languages = tuple(dict.fromkeys(language.strip() for language in preferred_languages if language.strip()))
+        languages = tuple(
+            dict.fromkeys(
+                language.strip() for language in preferred_languages if language.strip()
+            )
+        )
 
         if languages:
             try:
@@ -178,7 +214,10 @@ class TranscriptService:
             except NoTranscriptFound:
                 pass
 
-        english_requested = any(language.lower().startswith("en") for language in languages) or not languages
+        english_requested = (
+            any(language.lower().startswith("en") for language in languages)
+            or not languages
+        )
         if english_requested:
             for transcript in transcript_list:
                 if getattr(transcript, "language_code", "").startswith("en"):
@@ -188,12 +227,20 @@ class TranscriptService:
                     try:
                         return transcript.translate("en")
                     except Exception:
+                        logger.debug(
+                            "Transcript translation failed; trying the next track.",
+                            exc_info=True,
+                        )
                         continue
 
         for transcript in transcript_list:
             return transcript
 
-        raise NoTranscriptFound(video_id="unknown", requested_language_codes=list(languages), transcript_data=[])
+        raise NoTranscriptFound(
+            video_id="unknown",
+            requested_language_codes=list(languages),
+            transcript_data=[],
+        )
 
     def _extract_video_info(self, source_url: str) -> dict:
         options = {
@@ -211,18 +258,32 @@ class TranscriptService:
         automatic_captions: dict,
         preferred_languages: tuple[str, ...],
     ) -> tuple[dict, bool, str, str]:
-        for language_code in self._candidate_language_codes(preferred_languages, subtitles, automatic_captions):
+        for language_code in self._candidate_language_codes(
+            preferred_languages, subtitles, automatic_captions
+        ):
             manual_tracks = subtitles.get(language_code) or []
             track = self._pick_track(manual_tracks)
             if track:
-                return track, False, language_code, str(track.get("name") or language_code)
+                return (
+                    track,
+                    False,
+                    language_code,
+                    str(track.get("name") or language_code),
+                )
 
             automatic_tracks = automatic_captions.get(language_code) or []
             track = self._pick_track(automatic_tracks)
             if track:
-                return track, True, language_code, str(track.get("name") or language_code)
+                return (
+                    track,
+                    True,
+                    language_code,
+                    str(track.get("name") or language_code),
+                )
 
-        raise TranscriptRetrievalError("No subtitle or automatic caption tracks were available via yt-dlp.")
+        raise TranscriptRetrievalError(
+            "No subtitle or automatic caption tracks were available via yt-dlp."
+        )
 
     def _candidate_language_codes(
         self,
@@ -230,7 +291,9 @@ class TranscriptService:
         subtitles: dict,
         automatic_captions: dict,
     ) -> list[str]:
-        available_codes = list(dict.fromkeys([*subtitles.keys(), *automatic_captions.keys()]))
+        available_codes = list(
+            dict.fromkeys([*subtitles.keys(), *automatic_captions.keys()])
+        )
         if not available_codes:
             return []
 
@@ -239,9 +302,12 @@ class TranscriptService:
             normalized = language.lower()
             for code in available_codes:
                 lower_code = str(code).lower()
-                if lower_code == normalized or lower_code.startswith(normalized) or normalized.startswith(lower_code):
-                    if code not in ordered:
-                        ordered.append(code)
+                if (
+                    lower_code == normalized
+                    or lower_code.startswith(normalized)
+                    or normalized.startswith(lower_code)
+                ) and code not in ordered:
+                    ordered.append(code)
 
         for fallback_code in available_codes:
             if fallback_code not in ordered:
@@ -261,7 +327,9 @@ class TranscriptService:
                 return track
         return None
 
-    def _download_caption_segments(self, track_url: str) -> tuple[TranscriptSegment, ...]:
+    def _download_caption_segments(
+        self, track_url: str
+    ) -> tuple[TranscriptSegment, ...]:
         payload = self._get_json_with_retries(track_url, timeout=20)
         segments: list[TranscriptSegment] = []
 
@@ -280,7 +348,9 @@ class TranscriptService:
 
             start = float(event.get("tStartMs", 0)) / 1000.0
             duration = float(event.get("dDurationMs", 0)) / 1000.0
-            segments.append(TranscriptSegment(text=text, start=start, duration=max(duration, 0.0)))
+            segments.append(
+                TranscriptSegment(text=text, start=start, duration=max(duration, 0.0))
+            )
 
         deduped_segments: list[TranscriptSegment] = []
         for segment in segments:
@@ -289,7 +359,9 @@ class TranscriptService:
             deduped_segments.append(segment)
 
         if not deduped_segments:
-            raise TranscriptRetrievalError("A caption track was found, but it did not contain usable transcript text.")
+            raise TranscriptRetrievalError(
+                "A caption track was found, but it did not contain usable transcript text."
+            )
         return tuple(deduped_segments)
 
     def _fetch_video_title(self, source_url: str) -> str | None:
@@ -312,7 +384,9 @@ class TranscriptService:
                 time.sleep(0.2 * (attempt + 1))
         return None
 
-    def _get_json_with_retries(self, url: str, timeout: float, retries: int = 3) -> dict:
+    def _get_json_with_retries(
+        self, url: str, timeout: float, retries: int = 3
+    ) -> dict:
         last_error: Exception | None = None
         for attempt in range(retries):
             try:
@@ -320,10 +394,18 @@ class TranscriptService:
                 response.raise_for_status()
                 payload = response.json()
                 if not isinstance(payload, dict):
-                    raise TranscriptRetrievalError("Caption endpoint returned a non-object JSON payload.")
+                    raise TranscriptRetrievalError(
+                        "Caption endpoint returned a non-object JSON payload."
+                    )
                 return payload
-            except (requests.RequestException, ValueError, TranscriptRetrievalError) as error:
+            except (
+                requests.RequestException,
+                ValueError,
+                TranscriptRetrievalError,
+            ) as error:
                 last_error = error
                 if attempt < retries - 1:
                     time.sleep(0.3 * (attempt + 1))
-        raise TranscriptRetrievalError(f"Failed to download caption track after {retries} attempts: {last_error}")
+        raise TranscriptRetrievalError(
+            f"Failed to download caption track after {retries} attempts: {last_error}"
+        )

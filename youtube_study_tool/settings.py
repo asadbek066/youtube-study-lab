@@ -103,7 +103,10 @@ class LLMSettings:
 
     @property
     def config_error(self) -> str | None:
-        if self.requested_provider and self.requested_provider not in SUPPORTED_PROVIDERS:
+        if (
+            self.requested_provider
+            and self.requested_provider not in SUPPORTED_PROVIDERS
+        ):
             return (
                 f"LLM_PROVIDER={self.requested_provider!r} is unsupported. "
                 "Use heuristic, openai, azure_openai, or gemini."
@@ -140,7 +143,10 @@ class LLMSettings:
     @property
     def status_message(self) -> str:
         if self.provider == "heuristic":
-            if self.requested_provider and self.requested_provider not in SUPPORTED_PROVIDERS:
+            if (
+                self.requested_provider
+                and self.requested_provider not in SUPPORTED_PROVIDERS
+            ):
                 return f"{self.config_error} Using heuristic fallback."
             return "Heuristic mode is active. Set LLM_PROVIDER in .env to openai, azure_openai, or gemini to use an API provider."
 
@@ -155,10 +161,16 @@ def load_settings() -> LLMSettings:
     if not requested_provider:
         requested_provider = "openai" if _read_env("OPENAI_API_KEY") else "heuristic"
 
-    provider = requested_provider if requested_provider in SUPPORTED_PROVIDERS else "heuristic"
+    provider = (
+        requested_provider if requested_provider in SUPPORTED_PROVIDERS else "heuristic"
+    )
     temperature = _clamp_float(_read_float("LLM_TEMPERATURE", 0.3), 0.0, 2.0)
-    chunk_max_output_tokens = _clamp_int(_read_int("LLM_CHUNK_MAX_OUTPUT_TOKENS", 450), 64, 4000)
-    final_max_output_tokens = _clamp_int(_read_int("LLM_FINAL_MAX_OUTPUT_TOKENS", 2600), 128, 16000)
+    chunk_max_output_tokens = _clamp_int(
+        _read_int("LLM_CHUNK_MAX_OUTPUT_TOKENS", 450), 64, 4000
+    )
+    final_max_output_tokens = _clamp_int(
+        _read_int("LLM_FINAL_MAX_OUTPUT_TOKENS", 2600), 128, 16000
+    )
 
     return LLMSettings(
         requested_provider=requested_provider,
@@ -175,6 +187,10 @@ def load_settings() -> LLMSettings:
         temperature=temperature,
         chunk_max_output_tokens=chunk_max_output_tokens,
         final_max_output_tokens=final_max_output_tokens,
-        summary_style=_read_choice("SUMMARY_STYLE", "adaptive", SUPPORTED_SUMMARY_STYLES),
-        summary_detail=_read_choice("SUMMARY_DETAIL", "balanced", SUPPORTED_SUMMARY_DETAILS),
+        summary_style=_read_choice(
+            "SUMMARY_STYLE", "adaptive", SUPPORTED_SUMMARY_STYLES
+        ),
+        summary_detail=_read_choice(
+            "SUMMARY_DETAIL", "balanced", SUPPORTED_SUMMARY_DETAILS
+        ),
     )

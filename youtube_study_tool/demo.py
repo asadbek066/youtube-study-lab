@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from youtube_study_tool.models import TranscriptBundle, TranscriptSegment
 
-
 _DEMO_SEGMENTS = (
     TranscriptSegment(
         text="A neural network learns by looking at examples and adjusting small numerical weights inside the model.",
