@@ -18,7 +18,11 @@ from youtube_study_tool.generation import StudyPackGenerator
 from youtube_study_tool.manual import build_manual_transcript
 from youtube_study_tool.models import AnalysisBundle, TranscriptBundle
 from youtube_study_tool.transcripts import TranscriptService, normalize_languages
-from youtube_study_tool.utils import escape_html_text, format_seconds, timestamp_reference
+from youtube_study_tool.utils import (
+    escape_html_text,
+    format_seconds,
+    timestamp_reference,
+)
 
 load_dotenv()
 
@@ -188,7 +192,11 @@ def render_meta(bundle: TranscriptBundle, analysis: AnalysisBundle) -> None:
     col1, col2, col3, col4 = st.columns(4)
     cards = [
         ("Transcript", bundle.language_name),
-        ("Source", bundle.source_label or ("Auto captions" if bundle.is_generated else "Manual captions")),
+        (
+            "Source",
+            bundle.source_label
+            or ("Auto captions" if bundle.is_generated else "Manual captions"),
+        ),
         ("Type", analysis.classification.video_type.title()),
         ("Generator", f"{analysis.provider} ({analysis.model})"),
     ]
@@ -266,17 +274,25 @@ def run() -> None:
 
     with st.sidebar:
         st.header("Study settings")
-        language_input = st.text_input("Preferred transcript languages", value="en,en-US,en-GB")
+        language_input = st.text_input(
+            "Preferred transcript languages", value="en,en-US,en-GB"
+        )
 
         if generator.settings.provider == "heuristic":
-            st.success("No-key mode ready. Study packs are generated with local rules after transcript retrieval.")
+            st.success(
+                "No-key mode ready. Study packs are generated with local rules after transcript retrieval."
+            )
         elif generator.is_ready:
             st.success(f"{generator.provider_label} is ready.")
         else:
-            st.warning(f"{generator.provider_label} is not fully configured; no-key mode will be used.")
+            st.warning(
+                f"{generator.provider_label} is not fully configured; no-key mode will be used."
+            )
 
         with st.expander("Provider details"):
-            st.caption("Provider and model are controlled through `.env`; keys are never entered in this interface.")
+            st.caption(
+                "Provider and model are controlled through `.env`; keys are never entered in this interface."
+            )
             st.markdown(f"**Provider:** {generator.provider_label}")
             st.markdown(f"**Model/deployment:** `{generator.model_name}`")
             st.markdown(
@@ -284,7 +300,9 @@ def run() -> None:
             )
             st.caption(generator.status_message)
 
-        st.caption("A public caption track is required when you use your own YouTube link.")
+        st.caption(
+            "A public caption track is required when you use your own YouTube link."
+        )
 
     st.markdown('<div class="section-label">Start here</div>', unsafe_allow_html=True)
     demo_requested = st.button(
@@ -293,9 +311,13 @@ def run() -> None:
         use_container_width=True,
         type="primary",
     )
-    st.caption("Uses an original sample transcript and local generation—no YouTube request or API key.")
+    st.caption(
+        "Uses an original sample transcript and local generation—no YouTube request or API key."
+    )
 
-    st.markdown('<div class="section-label">Or use your own video</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-label">Or use your own video</div>', unsafe_allow_html=True
+    )
     with st.form("analyze-form"):
         source = st.text_input(
             "YouTube URL or video ID",
@@ -304,7 +326,9 @@ def run() -> None:
         submitted = st.form_submit_button("Build study pack", use_container_width=True)
 
     with st.expander("YouTube blocked? Paste a transcript instead"):
-        st.caption("Useful on hosted servers where YouTube blocks transcript requests. No timestamps are invented.")
+        st.caption(
+            "Useful on hosted servers where YouTube blocks transcript requests. No timestamps are invented."
+        )
         with st.form("manual-transcript-form"):
             manual_title = st.text_input(
                 "Title",
@@ -344,10 +368,15 @@ def run() -> None:
         except ValueError as error:
             st.error(str(error))
             return
-        except (NoTranscriptFound, TranscriptsDisabled, CouldNotRetrieveTranscript, YouTubeTranscriptApiException) as error:
+        except (
+            NoTranscriptFound,
+            TranscriptsDisabled,
+            CouldNotRetrieveTranscript,
+            YouTubeTranscriptApiException,
+        ) as error:
             st.error(f"Transcript extraction failed: {error}")
             return
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - keep the UI alive for provider failures.
             st.error(f"Unexpected error: {error}")
             return
 
@@ -361,7 +390,7 @@ def run() -> None:
         except ValueError as error:
             st.error(str(error))
             return
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - keep the UI alive for generation failures.
             st.error(f"Unexpected error: {error}")
             return
 
@@ -387,9 +416,13 @@ def run() -> None:
     if transcript_bundle.source_url:
         st.video(transcript_bundle.source_url)
     elif transcript_bundle.source_label == "Pasted transcript":
-        st.info("Pasted transcript: the study pack was generated without a YouTube request or invented timestamps.")
+        st.info(
+            "Pasted transcript: the study pack was generated without a YouTube request or invented timestamps."
+        )
     else:
-        st.info("Instant demo: an original sample transcript is being processed locally without YouTube or an API key.")
+        st.info(
+            "Instant demo: an original sample transcript is being processed locally without YouTube or an API key."
+        )
     render_meta(transcript_bundle, analysis_bundle)
 
     pack_text = compile_study_pack(transcript_bundle, analysis_bundle)

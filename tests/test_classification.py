@@ -1,4 +1,7 @@
-from youtube_study_tool.classification import heuristic_classification, parse_classification_json
+from youtube_study_tool.classification import (
+    heuristic_classification,
+    parse_classification_json,
+)
 from youtube_study_tool.models import TranscriptBundle, TranscriptSegment
 
 

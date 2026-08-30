@@ -11,7 +11,9 @@ def _capture_llm_prompts(bundle, monkeypatch) -> list[str]:
     generator.client = object()
     prompts: list[str] = []
 
-    monkeypatch.setattr(generator, "_classify", lambda _: heuristic_classification(bundle))
+    monkeypatch.setattr(
+        generator, "_classify", lambda _: heuristic_classification(bundle)
+    )
 
     def fake_complete(prompt: str, instructions: str, **_kwargs) -> str:
         prompts.append(prompt)
@@ -32,7 +34,9 @@ def test_pasted_transcript_never_sends_a_timecode_to_llm(monkeypatch) -> None:
     prompts = _capture_llm_prompts(bundle, monkeypatch)
 
     assert prompts
-    assert all(not re.search(r"\b\d{2}:\d{2}(?::\d{2})?\b", prompt) for prompt in prompts)
+    assert all(
+        not re.search(r"\b\d{2}:\d{2}(?::\d{2})?\b", prompt) for prompt in prompts
+    )
     assert all("Approximate duration:" not in prompt for prompt in prompts)
 
 

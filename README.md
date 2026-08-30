@@ -134,11 +134,14 @@ The app validates numeric bounds and automatically falls back to local generatio
 Install the dependencies, then run:
 
 ```bash
+python -m pip install -r requirements-dev.txt
+python -m ruff check app.py youtube_study_tool tests
+python -m ruff format --check app.py youtube_study_tool tests
 python -m pytest tests -q
 python -m compileall -q app.py youtube_study_tool tests
 ```
 
-The GitHub Actions workflow runs the test suite on Python 3.11 and 3.12 for pushes and pull requests.
+The GitHub Actions workflow runs lint, formatting, and the test suite on Python 3.11 and 3.12 for pushes and pull requests.
 
 ## Current limitations
 

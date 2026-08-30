@@ -4,9 +4,9 @@ import math
 import random
 import re
 from collections import Counter
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from html import escape
-from typing import Iterable, Sequence
 
 from youtube_study_tool.models import TranscriptSegment
 
@@ -173,7 +173,9 @@ def timestamp_url(video_id: str, start_seconds: float) -> str:
     return f"https://www.youtube.com/watch?v={video_id}&t={seconds}s"
 
 
-def timestamp_reference(video_id: str, start_seconds: float, *, linked: bool = True) -> str:
+def timestamp_reference(
+    video_id: str, start_seconds: float, *, linked: bool = True
+) -> str:
     label = format_seconds(start_seconds)
     if not linked:
         return label
@@ -211,12 +213,22 @@ def build_passages(
         current_end = segment.end
         joined = " ".join(current_text)
         if len(joined) >= target_chars or SENTENCE_END_RE.search(snippet):
-            passages.append(Passage(text=clean_whitespace(joined), start=current_start, end=current_end))
+            passages.append(
+                Passage(
+                    text=clean_whitespace(joined), start=current_start, end=current_end
+                )
+            )
             current_text = []
             current_start = None
 
     if current_text and current_start is not None:
-        passages.append(Passage(text=clean_whitespace(" ".join(current_text)), start=current_start, end=current_end))
+        passages.append(
+            Passage(
+                text=clean_whitespace(" ".join(current_text)),
+                start=current_start,
+                end=current_end,
+            )
+        )
 
     return passages
 
@@ -232,13 +244,17 @@ def keyword_frequencies(texts: Iterable[str], limit: int = 16) -> list[tuple[str
 
 
 def rank_passages(passages: Sequence[Passage]) -> list[tuple[Passage, float]]:
-    frequencies = dict(keyword_frequencies([passage.text for passage in passages], limit=200))
+    frequencies = dict(
+        keyword_frequencies([passage.text for passage in passages], limit=200)
+    )
     ranked: list[tuple[Passage, float]] = []
     for passage in passages:
         tokens = [token for token in tokenize(passage.text) if token not in STOPWORDS]
         if not tokens:
             continue
-        score = sum(frequencies.get(token, 0) for token in tokens) / math.sqrt(len(tokens))
+        score = sum(frequencies.get(token, 0) for token in tokens) / math.sqrt(
+            len(tokens)
+        )
         ranked.append((passage, score))
     ranked.sort(key=lambda item: item[1], reverse=True)
     return ranked
@@ -270,7 +286,9 @@ def build_chunked_text(
 
     for segment in segments:
         text = clean_whitespace(segment.text)
-        line = f"[{format_seconds(segment.start)}] {text}" if include_timestamps else text
+        line = (
+            f"[{format_seconds(segment.start)}] {text}" if include_timestamps else text
+        )
         if current_lines and current_length + len(line) + 1 > max_chars:
             chunks.append("\n".join(current_lines))
             current_lines = []
@@ -284,7 +302,9 @@ def build_chunked_text(
     return chunks
 
 
-def pick_keyword_candidates(text: str, fallback_pool: Sequence[str]) -> tuple[str, list[str]]:
+def pick_keyword_candidates(
+    text: str, fallback_pool: Sequence[str]
+) -> tuple[str, list[str]]:
     tokens = [token for token in tokenize(text) if token not in STOPWORDS]
     counts = Counter(token for token in tokens if len(token) >= 4)
     if counts:

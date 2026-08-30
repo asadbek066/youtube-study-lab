@@ -21,7 +21,10 @@ def generate_fallback_bundle(bundle: TranscriptBundle) -> AnalysisBundle:
     passages = build_passages(bundle.segments)
     key_passages = _deduplicate_passages(select_key_passages(passages, limit=5))
     quiz_passages = _quiz_passages(bundle, passages)
-    keywords = [keyword for keyword, _count in keyword_frequencies([bundle.transcript_text], limit=12)]
+    keywords = [
+        keyword
+        for keyword, _count in keyword_frequencies([bundle.transcript_text], limit=12)
+    ]
     content_style = _normalize_style_for_fallback(classification.video_type)
 
     summary = _build_summary(bundle, key_passages, keywords, content_style)
@@ -45,7 +48,9 @@ def _build_summary(
 ) -> str:
     lines = ["## Summary"]
     if not passages:
-        lines.append("- Transcript was available, but there was not enough usable content for a reliable summary.")
+        lines.append(
+            "- Transcript was available, but there was not enough usable content for a reliable summary."
+        )
         return "\n".join(lines)
 
     lines.append("### 1. Overview")
@@ -115,7 +120,9 @@ def _build_study_notes(
     return "\n".join(lines)
 
 
-def _checkpoint_segments(bundle: TranscriptBundle, count: int) -> list[tuple[float, str]]:
+def _checkpoint_segments(
+    bundle: TranscriptBundle, count: int
+) -> list[tuple[float, str]]:
     if not bundle.segments:
         return []
     stride = max(1, len(bundle.segments) // count)
@@ -134,7 +141,7 @@ def _review_prompts(passages: list[Passage], keywords: list[str]) -> list[str]:
     prompts: list[str] = []
     for passage in passages[:3]:
         clue = passage.text.rstrip(".")
-        prompts.append(f"How would you explain this idea in your own words: \"{clue}\"?")
+        prompts.append(f'How would you explain this idea in your own words: "{clue}"?')
     for keyword in keywords[:3]:
         prompts.append(f"Why is `{keyword}` important in the overall lesson?")
     return prompts[:6] or ["What is the central lesson of this video?"]
@@ -153,8 +160,12 @@ def _build_key_concepts(passages: list[Passage], keywords: list[str]) -> list[st
     for passage in passages[:3]:
         concepts.append(passage.text)
     for keyword in keywords[:3]:
-        concepts.append(f"`{keyword}` appears repeatedly and likely marks a core concept.")
-    return concepts[:5] or ["No clear core concepts could be extracted from the transcript."]
+        concepts.append(
+            f"`{keyword}` appears repeatedly and likely marks a core concept."
+        )
+    return concepts[:5] or [
+        "No clear core concepts could be extracted from the transcript."
+    ]
 
 
 def _build_important_details(passages: list[Passage]) -> list[str]:
@@ -185,10 +196,14 @@ def _motivational_takeaways(keywords: list[str]) -> list[str]:
 
 
 def _build_main_ideas(passages: list[Passage]) -> list[str]:
-    return [passage.text for passage in passages[:4]] or ["There was not enough transcript content to identify the main ideas."]
+    return [passage.text for passage in passages[:4]] or [
+        "There was not enough transcript content to identify the main ideas."
+    ]
 
 
-def _build_step_breakdown(bundle: TranscriptBundle, passages: list[Passage]) -> list[str]:
+def _build_step_breakdown(
+    bundle: TranscriptBundle, passages: list[Passage]
+) -> list[str]:
     steps: list[str] = []
     for passage in passages[:4]:
         reference = (
@@ -201,10 +216,14 @@ def _build_step_breakdown(bundle: TranscriptBundle, passages: list[Passage]) -> 
             else ""
         )
         steps.append(f"{reference} {passage.text}".strip())
-    return steps or ["The transcript did not provide enough sequence detail for a step breakdown."]
+    return steps or [
+        "The transcript did not provide enough sequence detail for a step breakdown."
+    ]
 
 
-def _build_important_examples(bundle: TranscriptBundle, passages: list[Passage]) -> list[str]:
+def _build_important_examples(
+    bundle: TranscriptBundle, passages: list[Passage]
+) -> list[str]:
     markers = ("for example", "for instance", "imagine", "like", "such as", "let's say")
     examples: list[str] = []
     for passage in passages:
@@ -223,12 +242,16 @@ def _build_important_examples(bundle: TranscriptBundle, passages: list[Passage])
                 else ""
             )
             examples.append(f"{reference} {passage.text}".strip())
-    return examples[:3] or ["No clear standalone examples were found in the transcript."]
+    return examples[:3] or [
+        "No clear standalone examples were found in the transcript."
+    ]
 
 
 def _build_common_mistakes(passages: list[Passage], keywords: list[str]) -> list[str]:
     if not passages:
-        return ["No reliable misconceptions could be inferred from the transcript content."]
+        return [
+            "No reliable misconceptions could be inferred from the transcript content."
+        ]
 
     anchors = keywords[:3] or ["main idea", "sequence", "example"]
     mistakes = [
@@ -236,8 +259,13 @@ def _build_common_mistakes(passages: list[Passage], keywords: list[str]) -> list
         f"Do not skip the order of ideas, especially where `{anchors[1]}` appears.",
         f"Do not treat one example containing `{anchors[2]}` as the full concept.",
     ]
-    if any("not" in passage.text.lower() or "avoid" in passage.text.lower() for passage in passages):
-        mistakes.append("Watch for points where the speaker explicitly warns against a specific approach.")
+    if any(
+        "not" in passage.text.lower() or "avoid" in passage.text.lower()
+        for passage in passages
+    ):
+        mistakes.append(
+            "Watch for points where the speaker explicitly warns against a specific approach."
+        )
     return mistakes[:4]
 
 
@@ -262,24 +290,34 @@ def _build_practical_takeaways(
         f"Keep the sequence around `{anchors[2]}` intact during review.",
     ]
     if passages:
-        takeaways.append("Review the opening explanation first, then the later supporting details in order.")
+        takeaways.append(
+            "Review the opening explanation first, then the later supporting details in order."
+        )
     return takeaways[:4]
 
 
 def _build_what_to_remember(passages: list[Passage], keywords: list[str]) -> list[str]:
     reminders: list[str] = []
     if passages:
-        reminders.append("Keep the speaker's original sequence when revising this topic.")
+        reminders.append(
+            "Keep the speaker's original sequence when revising this topic."
+        )
         reminders.append(passages[0].text)
     for keyword in keywords[:3]:
-        reminders.append(f"Remember `{keyword}` as a recurring anchor in the transcript.")
-    return reminders[:5] or ["Remember the core topic and the order used to develop it."]
+        reminders.append(
+            f"Remember `{keyword}` as a recurring anchor in the transcript."
+        )
+    return reminders[:5] or [
+        "Remember the core topic and the order used to develop it."
+    ]
 
 
 def _build_compressed_paragraph(passages: list[Passage]) -> str:
     text = " ".join(passage.text.rstrip(".") for passage in passages[:3]).strip()
     if not text:
-        return "The transcript was too short to produce a reliable compressed paragraph."
+        return (
+            "The transcript was too short to produce a reliable compressed paragraph."
+        )
     return f"{text}."
 
 
@@ -325,7 +363,10 @@ def _build_quiz(
         lines.append("The transcript was too short to generate a reliable quiz set.")
         return "\n".join(lines)
 
-    fallback_pool = keywords or [token for token in tokenize(bundle.transcript_text) if len(token) >= 4][:12]
+    fallback_pool = (
+        keywords
+        or [token for token in tokenize(bundle.transcript_text) if len(token) >= 4][:12]
+    )
     lines.append("### 1. Multiple-choice questions")
     for block in _build_multiple_choice_questions(bundle, passages, fallback_pool):
         lines.extend(block)
@@ -337,7 +378,9 @@ def _build_quiz(
         lines.append("")
 
     lines.append("### 3. Application-based questions")
-    for block in _build_application_questions(bundle, passages, keywords, content_style):
+    for block in _build_application_questions(
+        bundle, passages, keywords, content_style
+    ):
         lines.extend(block)
         lines.append("")
 
@@ -355,7 +398,9 @@ def _build_multiple_choice_questions(
         difficulty = _difficulty_label(index)
         passage = passages[index % len(passages)]
         answer, distractors = pick_keyword_candidates(passage.text, fallback_pool)
-        options = stable_shuffle([answer, *distractors], f"{bundle.video_id}-mcq-{question_number}")
+        options = stable_shuffle(
+            [answer, *distractors], f"{bundle.video_id}-mcq-{question_number}"
+        )
         answer_letter = "ABCD"[options.index(answer)]
 
         if index % 3 == 0:
@@ -403,12 +448,12 @@ def _build_short_answer_questions(
             "This is stated in the title or the opening transcript lines.",
         ),
         (
-            f"12. [medium] Name one key concept the speaker emphasizes.",
+            "12. [medium] Name one key concept the speaker emphasizes.",
             anchors[0],
             f"`{anchors[0]}` appears repeatedly and functions as a core concept.",
         ),
         (
-            f"13. [medium] What important detail does the speaker give about the topic?",
+            "13. [medium] What important detail does the speaker give about the topic?",
             details[0].text if details else _build_topic(bundle, passages),
             "This detail is stated directly in the early transcript content.",
         ),
@@ -502,5 +547,16 @@ def _build_application_questions(
 
 
 def _difficulty_label(index: int) -> str:
-    pattern = ("easy", "easy", "medium", "medium", "hard", "easy", "medium", "hard", "medium", "hard")
+    pattern = (
+        "easy",
+        "easy",
+        "medium",
+        "medium",
+        "hard",
+        "easy",
+        "medium",
+        "hard",
+        "medium",
+        "hard",
+    )
     return pattern[index % len(pattern)]
