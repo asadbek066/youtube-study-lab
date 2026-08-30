@@ -33,6 +33,6 @@ def test_manual_study_pack_contains_no_fabricated_timestamps() -> None:
         "A model predicts an answer. The loss measures its error. Gradient descent updates the weights."
     )
     analysis = generate_fallback_bundle(bundle)
-    complete_pack = "\n".join((analysis.summary, analysis.study_notes, analysis.quiz))
+    complete_pack = f"{analysis.summary}\n{analysis.study_notes}\n{analysis.quiz}"
 
     assert not re.search(r"\b\d{2}:\d{2}(?::\d{2})?\b", complete_pack)

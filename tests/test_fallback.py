@@ -12,9 +12,17 @@ def test_generate_fallback_bundle_creates_all_sections() -> None:
             "Functions help you reuse logic and keep code organized."
         ),
         segments=(
-            TranscriptSegment(text="Python lists let you store items in order.", start=0, duration=4),
-            TranscriptSegment(text="Dictionaries store key value pairs.", start=5, duration=4),
-            TranscriptSegment(text="Functions help you reuse logic and keep code organized.", start=10, duration=5),
+            TranscriptSegment(
+                text="Python lists let you store items in order.", start=0, duration=4
+            ),
+            TranscriptSegment(
+                text="Dictionaries store key value pairs.", start=5, duration=4
+            ),
+            TranscriptSegment(
+                text="Functions help you reuse logic and keep code organized.",
+                start=10,
+                duration=5,
+            ),
         ),
         language_code="en",
         language_name="English",
@@ -58,8 +66,16 @@ def test_generate_fallback_bundle_uses_tutorial_shape() -> None:
             "First we set up the project, then create the layout, then deploy it."
         ),
         segments=(
-            TranscriptSegment(text="In this tutorial we build a portfolio website step by step.", start=0, duration=4),
-            TranscriptSegment(text="First we set up the project, then create the layout, then deploy it.", start=5, duration=4),
+            TranscriptSegment(
+                text="In this tutorial we build a portfolio website step by step.",
+                start=0,
+                duration=4,
+            ),
+            TranscriptSegment(
+                text="First we set up the project, then create the layout, then deploy it.",
+                start=5,
+                duration=4,
+            ),
         ),
         language_code="en",
         language_name="English",

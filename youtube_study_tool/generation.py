@@ -16,11 +16,17 @@ from youtube_study_tool.classification import (
     parse_classification_json,
 )
 from youtube_study_tool.fallback import generate_fallback_bundle
-from youtube_study_tool.models import AnalysisBundle, TranscriptBundle, VideoClassification
+from youtube_study_tool.models import (
+    AnalysisBundle,
+    TranscriptBundle,
+    VideoClassification,
+)
 from youtube_study_tool.settings import LLMSettings, load_settings
 from youtube_study_tool.utils import build_chunked_text, format_seconds
 
-SECTION_RE = re.compile(r"<(?P<name>summary|study_notes|quiz)>\s*(?P<body>.*?)\s*</\1>", re.DOTALL)
+SECTION_RE = re.compile(
+    r"<(?P<name>summary|study_notes|quiz)>\s*(?P<body>.*?)\s*</\1>", re.DOTALL
+)
 logger = logging.getLogger(__name__)
 
 LEARNING_ASSISTANT_PROMPT = """
@@ -116,14 +122,17 @@ class StudyPackGenerator:
         classification = self._classify(bundle)
         chunk_summaries = self._chunk_summaries(bundle)
         source_text = "\n\n".join(
-            f"Excerpt {index + 1} summary:\n{summary}" for index, summary in enumerate(chunk_summaries)
+            f"Excerpt {index + 1} summary:\n{summary}"
+            for index, summary in enumerate(chunk_summaries)
         )
         metadata_lines = [
             f"Video title: {bundle.video_title or 'Unknown'}",
             f"Transcript length: {bundle.word_count} words",
         ]
         if bundle.duration_seconds > 0:
-            metadata_lines.append(f"Approximate duration: {format_seconds(bundle.duration_seconds)}")
+            metadata_lines.append(
+                f"Approximate duration: {format_seconds(bundle.duration_seconds)}"
+            )
         metadata_text = "\n".join(metadata_lines)
         response_text = self._complete(
             prompt=(
@@ -137,7 +146,9 @@ class StudyPackGenerator:
         )
         sections = _parse_sections(response_text)
         if not all(sections.values()):
-            raise ValueError("The model response did not contain all required sections.")
+            raise ValueError(
+                "The model response did not contain all required sections."
+            )
         return AnalysisBundle(
             summary=sections["summary"],
             study_notes=sections["study_notes"],
@@ -158,8 +169,10 @@ class StudyPackGenerator:
         )
         try:
             return parse_classification_json(response_text)
-        except Exception:
-            logger.warning("Classification parse failed, using heuristic classification.")
+        except (AttributeError, TypeError, ValueError):
+            logger.warning(
+                "Classification parse failed, using heuristic classification."
+            )
             return heuristic_classification(bundle)
 
     def _chunk_summaries(self, bundle: TranscriptBundle) -> list[str]:
@@ -201,9 +214,13 @@ class StudyPackGenerator:
             raise RuntimeError("No model client is configured.")
 
         if self.settings.provider in {"openai", "azure_openai"}:
-            return self._complete_openai_family(prompt, instructions, max_output_tokens, temperature)
+            return self._complete_openai_family(
+                prompt, instructions, max_output_tokens, temperature
+            )
         if self.settings.provider == "gemini":
-            return self._complete_gemini(prompt, instructions, max_output_tokens, temperature)
+            return self._complete_gemini(
+                prompt, instructions, max_output_tokens, temperature
+            )
         raise RuntimeError(f"Unsupported provider: {self.settings.provider}")
 
     def _complete_openai_family(
@@ -244,7 +261,9 @@ class StudyPackGenerator:
             "max_output_tokens": max_output_tokens,
         }
         if self.model_name.startswith("gemini-2.5"):
-            config_kwargs["thinking_config"] = genai_types.ThinkingConfig(thinking_budget=0)
+            config_kwargs["thinking_config"] = genai_types.ThinkingConfig(
+                thinking_budget=0
+            )
 
         response = self.client.models.generate_content(
             model=self.model_name,
@@ -271,7 +290,9 @@ def _parse_sections(response_text: str) -> dict[str, str]:
     return sections
 
 
-def _build_final_prompt(settings: LLMSettings, classification: VideoClassification) -> str:
+def _build_final_prompt(
+    settings: LLMSettings, classification: VideoClassification
+) -> str:
     return f"""
 {LEARNING_ASSISTANT_PROMPT}
 

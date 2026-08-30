@@ -179,7 +179,9 @@ KEYWORDS = {
 }
 
 
-def build_classification_prompt(bundle: TranscriptBundle, max_chars: int = 12000) -> str:
+def build_classification_prompt(
+    bundle: TranscriptBundle, max_chars: int = 12000
+) -> str:
     transcript_excerpt = bundle.transcript_text[:max_chars]
     return (
         f"Video title: {bundle.video_title or 'Unknown'}\n"
@@ -248,7 +250,9 @@ def heuristic_classification(bundle: TranscriptBundle) -> VideoClassification:
         scores["tutorial"] *= 0.7
     if scores["interview"] >= 3 and text.count("?") >= 2:
         scores["interview"] += 1.5
-    if scores["storytelling"] >= 2 and any(token in token_counts for token in {"i", "we", "he", "she"}):
+    if scores["storytelling"] >= 2 and any(
+        token in token_counts for token in ("i", "we", "he", "she")
+    ):
         scores["storytelling"] += 0.5
 
     top_type, top_score = max(scores.items(), key=lambda item: item[1])
@@ -275,7 +279,9 @@ def heuristic_classification(bundle: TranscriptBundle) -> VideoClassification:
     )
 
 
-def _build_reason(video_type: str, scores: dict[str, float], token_counts: Counter[str]) -> str:
+def _build_reason(
+    video_type: str, scores: dict[str, float], token_counts: Counter[str]
+) -> str:
     keywords = KEYWORDS[video_type]
     anchors = sorted(
         ((token, token_counts.get(token, 0)) for token in keywords if " " not in token),
@@ -285,7 +291,9 @@ def _build_reason(video_type: str, scores: dict[str, float], token_counts: Count
     positive = [token for token, count in anchors if count > 0][:3]
     anchor_text = ", ".join(positive) if positive else "overall language and structure"
     top_score = scores.get(video_type, 0.0)
-    runner_up_score = max((score for kind, score in scores.items() if kind != video_type), default=0.0)
+    runner_up_score = max(
+        (score for kind, score in scores.items() if kind != video_type), default=0.0
+    )
     margin = top_score - runner_up_score
     return (
         f"Classified as {video_type} from recurring cues ({anchor_text}). "

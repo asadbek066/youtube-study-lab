@@ -1,6 +1,6 @@
 # Launch Runbook
 
-The live demo at https://yowassup.streamlit.app/ was verified end-to-end with the built-in sample, pasted transcript, and a real captioned YouTube video. Tailor community posts to each community's rules.
+The live demo is available at https://yowassup.streamlit.app/. The checklist below is the release gate; mark each item only after the current deployment has been tested and the evidence recorded. Tailor community posts to each community's rules.
 
 ## Preflight
 
