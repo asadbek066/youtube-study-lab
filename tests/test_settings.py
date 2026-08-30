@@ -18,13 +18,18 @@ def test_settings_allow_global_model_override(monkeypatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "azure_openai")
     monkeypatch.setenv("LLM_MODEL", "study-pack-deployment")
     monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")
-    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example-resource.openai.azure.com")
+    monkeypatch.setenv(
+        "AZURE_OPENAI_ENDPOINT", "https://example-resource.openai.azure.com"
+    )
     monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "unused-default")
 
     settings = load_settings()
 
     assert settings.active_model == "study-pack-deployment"
-    assert settings.azure_openai_base_url == "https://example-resource.openai.azure.com/openai/v1/"
+    assert (
+        settings.azure_openai_base_url
+        == "https://example-resource.openai.azure.com/openai/v1/"
+    )
     assert settings.is_ready is True
 
 

@@ -1,8 +1,14 @@
-from youtube_study_tool.transcripts import TranscriptService, extract_video_id, normalize_languages
+from youtube_study_tool.transcripts import (
+    TranscriptService,
+    extract_video_id,
+    normalize_languages,
+)
 
 
 def test_extract_video_id_from_watch_url() -> None:
-    assert extract_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    assert (
+        extract_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    )
 
 
 def test_extract_video_id_from_short_link() -> None:
@@ -38,7 +44,10 @@ def test_download_caption_segments_parses_json3_payload(monkeypatch) -> None:
                 ]
             }
 
-    monkeypatch.setattr("youtube_study_tool.transcripts.requests.get", lambda *args, **kwargs: DummyResponse())
+    monkeypatch.setattr(
+        "youtube_study_tool.transcripts.requests.get",
+        lambda *args, **kwargs: DummyResponse(),
+    )
 
     service = TranscriptService()
     segments = service._download_caption_segments("https://example.com/captions.json3")
