@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import random
 import re
@@ -148,8 +149,13 @@ STOPWORDS = {
     "uh",
 }
 
-WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'-]{2,}")
+WORD_RE = re.compile(r"[^\W\d_][\w'-]{2,}", re.UNICODE)
 SENTENCE_END_RE = re.compile(r"[.!?]\s*$")
+MARKDOWN_IMAGE_RE = re.compile(r"!\[([^]]*)\]\([^)]*\)", re.DOTALL)
+MARKDOWN_LINK_RE = re.compile(r"\[([^]]*)\]\([^)]*\)", re.DOTALL)
+MARKDOWN_REFERENCE_DEF_RE = re.compile(r"(?m)^\s{0,3}\[[^]\n]+\]:\s*\S.*$")
+MARKDOWN_REFERENCE_USE_RE = re.compile(r"\[([^]\n]+)\]\[[^]\n]*\]")
+BARE_URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -190,6 +196,28 @@ def clean_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def encode_untrusted_json(value: object) -> str:
+    """Serialize model input as JSON without emitting markup delimiters."""
+    encoded = json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+    return (
+        encoded.replace("<", r"\u003c").replace(">", r"\u003e").replace("&", r"\u0026")
+    )
+
+
+def sanitize_untrusted_markdown(value: str) -> str:
+    """Keep formatting while disabling links, images, and raw HTML from input."""
+    sanitized = str(value)
+    previous = None
+    while sanitized != previous:
+        previous = sanitized
+        sanitized = MARKDOWN_IMAGE_RE.sub(r"\1", sanitized)
+        sanitized = MARKDOWN_LINK_RE.sub(r"\1", sanitized)
+        sanitized = MARKDOWN_REFERENCE_USE_RE.sub(r"\1", sanitized)
+        sanitized = MARKDOWN_REFERENCE_DEF_RE.sub("[external link removed]", sanitized)
+    sanitized = BARE_URL_RE.sub("[external link removed]", sanitized)
+    return sanitized.replace("<", "&lt;").replace(">", "&gt;")
+
+
 def tokenize(text: str) -> list[str]:
     return [match.group(0).lower() for match in WORD_RE.finditer(text)]
 
@@ -198,37 +226,64 @@ def build_passages(
     segments: Sequence[TranscriptSegment],
     target_chars: int = 320,
 ) -> list[Passage]:
+    if target_chars <= 0:
+        raise ValueError("target_chars must be positive")
+
     passages: list[Passage] = []
     current_text: list[str] = []
     current_start: float | None = None
     current_end = 0.0
 
+    def flush() -> None:
+        nonlocal current_start, current_end, current_text
+        if current_text and current_start is not None:
+            passages.append(
+                Passage(
+                    text=clean_whitespace(" ".join(current_text)),
+                    start=current_start,
+                    end=current_end,
+                )
+            )
+        current_text = []
+        current_start = None
+
+    def split_text(text: str) -> list[str]:
+        parts: list[str] = []
+        while len(text) > target_chars:
+            cut = text.rfind(" ", 0, target_chars + 1)
+            cut = cut if cut > 0 else target_chars
+            parts.append(text[:cut].rstrip())
+            text = text[cut:].lstrip()
+        if text:
+            parts.append(text)
+        return parts
+
     for segment in segments:
         snippet = clean_whitespace(segment.text)
         if not snippet:
             continue
+
+        # A malformed or unusually long caption cue must not become one
+        # enormous passage that is repeated in every fallback section.
+        if len(snippet) > target_chars:
+            flush()
+            for part in split_text(snippet):
+                passages.append(
+                    Passage(text=part, start=segment.start, end=segment.end)
+                )
+            continue
+
+        if current_text and len(" ".join((*current_text, snippet))) > target_chars:
+            flush()
         if current_start is None:
             current_start = segment.start
         current_text.append(snippet)
         current_end = segment.end
         joined = " ".join(current_text)
         if len(joined) >= target_chars or SENTENCE_END_RE.search(snippet):
-            passages.append(
-                Passage(
-                    text=clean_whitespace(joined), start=current_start, end=current_end
-                )
-            )
-            current_text = []
-            current_start = None
+            flush()
 
-    if current_text and current_start is not None:
-        passages.append(
-            Passage(
-                text=clean_whitespace(" ".join(current_text)),
-                start=current_start,
-                end=current_end,
-            )
-        )
+    flush()
 
     return passages
 

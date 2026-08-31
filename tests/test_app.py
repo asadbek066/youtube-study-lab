@@ -54,3 +54,33 @@ def test_manual_transcript_form_builds_a_source_free_study_pack() -> None:
     assert "## Summary" in analysis.summary
     assert "youtube.com/watch?v=pasted-transcript" not in analysis.summary
     assert not app.exception
+
+
+def test_failed_manual_submission_clears_the_previous_pack() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
+    app.text_area(key="manual-transcript").input("A useful lesson about testing.")
+    app.button(key="manual-submit").click().run()
+    assert "transcript_bundle" in app.session_state
+
+    app.text_area(key="manual-transcript").input("")
+    app.button(key="manual-submit").click().run()
+
+    assert "transcript_bundle" not in app.session_state
+    assert "analysis_bundle" not in app.session_state
+    assert not app.exception
+
+
+def test_markdown_export_neutralizes_untrusted_metadata() -> None:
+    from app import compile_study_pack
+    from youtube_study_tool.fallback import generate_fallback_bundle
+    from youtube_study_tool.manual import build_manual_transcript
+
+    bundle = build_manual_transcript(
+        "A lesson explains tests and feedback.", title="[click](javascript:alert(1))"
+    )
+    analysis = generate_fallback_bundle(bundle)
+
+    exported = compile_study_pack(bundle, analysis)
+
+    assert "javascript:" not in exported
+    assert "alert(1)" not in exported

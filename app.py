@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
 from textwrap import dedent
 
@@ -29,10 +30,16 @@ from youtube_study_tool.transcripts import (
 from youtube_study_tool.utils import (
     escape_html_text,
     format_seconds,
+    sanitize_untrusted_markdown,
     timestamp_reference,
 )
 
 load_dotenv()
+logger = logging.getLogger(__name__)
+
+MAX_RENDERED_SEGMENTS = 200
+MAX_TRANSCRIPT_PREVIEW_CHARS = 60_000
+MAX_PAID_SUBMISSIONS_PER_SESSION = 3
 
 st.set_page_config(
     page_title="YouTube Study Lab",
@@ -48,7 +55,7 @@ st.markdown(
     :root {
         --paper: #fcf8ef;
         --ink: #17222d;
-        --accent: #c96a3f;
+        --accent: #9a4f2f;
         --accent-soft: #f5d3b6;
         --card: rgba(255, 255, 255, 0.82);
         --border: rgba(23, 34, 45, 0.1);
@@ -145,8 +152,8 @@ st.markdown(
     }
 
     div.stButton > button[kind="primary"]:hover {
-        background: #ad5330;
-        border-color: #ad5330;
+        background: #7f3f26;
+        border-color: #7f3f26;
         color: #ffffff;
     }
 
@@ -230,16 +237,26 @@ def render_transcript_tab(bundle: TranscriptBundle) -> None:
         mime="text/plain",
         use_container_width=True,
     )
-    st.text_area("Transcript text", value=bundle.transcript_text, height=320)
+    preview = bundle.transcript_text[:MAX_TRANSCRIPT_PREVIEW_CHARS]
+    if len(bundle.transcript_text) > MAX_TRANSCRIPT_PREVIEW_CHARS:
+        preview += "\n\n[Preview truncated; download the transcript for the full text.]"
+    st.text_area("Transcript preview", value=preview, height=320)
     if bundle.duration_seconds > 0:
         with st.expander("Timestamped transcript"):
-            for segment in bundle.segments:
+            for segment in bundle.segments[:MAX_RENDERED_SEGMENTS]:
                 reference = timestamp_reference(
                     bundle.video_id,
                     segment.start,
                     linked=bool(bundle.source_url),
                 )
-                st.markdown(f"{reference} {segment.text}")
+                if bundle.source_url:
+                    st.markdown(reference)
+                st.text(segment.text)
+            if len(bundle.segments) > MAX_RENDERED_SEGMENTS:
+                st.caption(
+                    f"Showing the first {MAX_RENDERED_SEGMENTS} caption segments. "
+                    "Download the transcript for the complete text."
+                )
     else:
         st.caption("Timestamps are unavailable for pasted transcript text.")
 
@@ -248,31 +265,50 @@ def render_classification_tab(analysis: AnalysisBundle) -> None:
     classification = analysis.classification
     st.markdown(f"### {classification.video_type.title()}")
     st.markdown(f"**Confidence:** {classification.confidence:.2f}")
-    st.markdown(f"**Reason:** {classification.reason}")
-    st.markdown(f"**Best summary style:** {classification.best_summary_style}")
-    st.markdown(f"**Best note style:** {classification.best_note_style}")
+    st.text(f"Reason: {classification.reason}")
+    st.text(f"Best summary style: {classification.best_summary_style}")
+    st.text(f"Best note style: {classification.best_note_style}")
     st.json(asdict(classification))
 
 
 def compile_study_pack(bundle: TranscriptBundle, analysis: AnalysisBundle) -> str:
+    title = sanitize_untrusted_markdown(bundle.video_title or bundle.video_id)
+    classification_reason = sanitize_untrusted_markdown(analysis.classification.reason)
     return dedent(
         f"""
-        # {bundle.video_title or bundle.video_id}
+        # {title}
 
         Source: {bundle.source_url or bundle.source_label or "Unknown"}
         Transcript language: {bundle.language_name} ({bundle.language_code})
         Duration: {format_seconds(bundle.duration_seconds)}
         Generated with: {analysis.provider} ({analysis.model})
         Video type: {analysis.classification.video_type} ({analysis.classification.confidence:.2f})
-        Classification reason: {analysis.classification.reason}
+        Classification reason: {classification_reason}
 
-        {analysis.summary}
+        {sanitize_untrusted_markdown(analysis.summary)}
 
-        {analysis.study_notes}
+        {sanitize_untrusted_markdown(analysis.study_notes)}
 
-        {analysis.quiz}
+        {sanitize_untrusted_markdown(analysis.quiz)}
         """
     ).strip()
+
+
+def generate_study_pack(
+    generator: StudyPackGenerator, bundle: TranscriptBundle
+) -> AnalysisBundle:
+    """Cap paid submissions per Streamlit session and keep the local fallback available."""
+    if not generator.is_ready:
+        return generator.generate(bundle)
+    used = int(st.session_state.get("paid_generation_submissions", 0))
+    if used >= MAX_PAID_SUBMISSIONS_PER_SESSION:
+        st.info(
+            "The provider-session limit has been reached. This pack uses local generation "
+            "so repeated submissions cannot create unbounded paid calls."
+        )
+        return generate_fallback_bundle(bundle)
+    st.session_state["paid_generation_submissions"] = used + 1
+    return generator.generate(bundle)
 
 
 def run() -> None:
@@ -356,6 +392,13 @@ def run() -> None:
                 key="manual-submit",
             )
 
+    if demo_requested or submitted or manual_submitted:
+        # Results belong to the last submitted input. Clear them before any
+        # validation or retrieval so a failed submission cannot resurrect an
+        # older study pack on the next rerun.
+        st.session_state.pop("transcript_bundle", None)
+        st.session_state.pop("analysis_bundle", None)
+
     if demo_requested:
         with st.spinner("Loading the network-free demo..."):
             transcript = build_demo_transcript()
@@ -373,7 +416,7 @@ def run() -> None:
             with st.spinner("Pulling transcript from YouTube..."):
                 transcript = transcript_service.fetch(source, languages)
             with st.spinner("Building summary, notes, and quiz..."):
-                analysis = generator.generate(transcript)
+                analysis = generate_study_pack(generator, transcript)
         except ValueError as error:
             st.error(str(error))
             return
@@ -384,10 +427,15 @@ def run() -> None:
             TranscriptRetrievalError,
             YouTubeTranscriptApiException,
         ) as error:
-            st.error(f"Transcript extraction failed: {error}")
+            logger.warning("Transcript extraction failed: %s", error, exc_info=True)
+            st.error(
+                "Transcript extraction failed. The video may be unavailable, "
+                "blocked, or missing a public caption track."
+            )
             return
-        except Exception as error:  # noqa: BLE001 - keep the UI alive for provider failures.
-            st.error(f"Unexpected error: {error}")
+        except Exception:  # keep the UI alive for provider failures.
+            logger.exception("Unexpected error while building a YouTube study pack")
+            st.error("Could not build the study pack. Please try again.")
             return
 
         st.session_state["transcript_bundle"] = transcript
@@ -396,12 +444,13 @@ def run() -> None:
         try:
             transcript = build_manual_transcript(manual_text, title=manual_title)
             with st.spinner("Building summary, notes, and quiz..."):
-                analysis = generator.generate(transcript)
+                analysis = generate_study_pack(generator, transcript)
         except ValueError as error:
             st.error(str(error))
             return
-        except Exception as error:  # noqa: BLE001 - keep the UI alive for generation failures.
-            st.error(f"Unexpected error: {error}")
+        except Exception:  # keep the UI alive for generation failures.
+            logger.exception("Unexpected error while building a pasted study pack")
+            st.error("Could not build the study pack. Please try again.")
             return
 
         st.session_state["transcript_bundle"] = transcript
@@ -422,7 +471,7 @@ def run() -> None:
         return
 
     title = transcript_bundle.video_title or transcript_bundle.video_id
-    st.subheader(title)
+    st.markdown(f"### {sanitize_untrusted_markdown(title)}")
     if transcript_bundle.source_url:
         st.video(transcript_bundle.source_url)
     elif transcript_bundle.source_label == "Pasted transcript":
@@ -448,11 +497,11 @@ def run() -> None:
         ["Summary", "Study Notes", "Quiz", "Classification", "Transcript"]
     )
     with summary_tab:
-        st.markdown(analysis_bundle.summary)
+        st.markdown(sanitize_untrusted_markdown(analysis_bundle.summary))
     with notes_tab:
-        st.markdown(analysis_bundle.study_notes)
+        st.markdown(sanitize_untrusted_markdown(analysis_bundle.study_notes))
     with quiz_tab:
-        st.markdown(analysis_bundle.quiz)
+        st.markdown(sanitize_untrusted_markdown(analysis_bundle.quiz))
     with classification_tab:
         render_classification_tab(analysis_bundle)
     with transcript_tab:

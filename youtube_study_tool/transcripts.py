@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
@@ -7,10 +8,11 @@ import time
 from collections.abc import Iterable
 from html import unescape
 from urllib.parse import parse_qs, urlparse
-from xml.etree import ElementTree
 
 import requests
 import yt_dlp
+from defusedxml import ElementTree
+from defusedxml.common import DefusedXmlException
 from youtube_transcript_api import (
     NoTranscriptFound,
     Transcript,
@@ -26,7 +28,9 @@ from youtube_study_tool.models import (
 from youtube_study_tool.utils import clean_whitespace
 
 VIDEO_ID_LENGTH = 11
+VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 LANGUAGE_CODE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
+MAX_CAPTION_PAYLOAD_BYTES = 2_000_000
 logger = logging.getLogger(__name__)
 
 
@@ -34,25 +38,71 @@ class TranscriptRetrievalError(Exception):
     """Raised when all available transcript backends fail."""
 
 
+class _BoundedYouTubeSession(requests.Session):
+    """Materialize YouTube API responses only after enforcing a byte ceiling."""
+
+    @staticmethod
+    def _materialize(response: requests.Response) -> requests.Response:
+        try:
+            content_length = response.headers.get(
+                "Content-Length"
+            ) or response.headers.get("content-length")
+            if (
+                content_length is not None
+                and int(content_length) > MAX_CAPTION_PAYLOAD_BYTES
+            ):
+                raise TranscriptRetrievalError(
+                    "Caption track is too large to process safely."
+                )
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > MAX_CAPTION_PAYLOAD_BYTES:
+                    raise TranscriptRetrievalError(
+                        "Caption track is too large to process safely."
+                    )
+                chunks.append(chunk)
+            response._content = b"".join(chunks)
+            response._content_consumed = True
+            return response
+        except Exception:
+            response.close()
+            raise
+        finally:
+            if response._content_consumed:
+                response.close()
+
+    def get(self, url: str, **kwargs: object) -> requests.Response:
+        kwargs["stream"] = True
+        kwargs.setdefault("timeout", 20)
+        return self._materialize(super().get(url, **kwargs))
+
+    def post(self, url: str, **kwargs: object) -> requests.Response:
+        kwargs["stream"] = True
+        kwargs.setdefault("timeout", 20)
+        return self._materialize(super().post(url, **kwargs))
+
+
 def extract_video_id(raw_value: str) -> str:
     candidate = clean_whitespace(raw_value)
     if not candidate:
         raise ValueError("Enter a YouTube URL or a video ID.")
 
-    if len(candidate) == VIDEO_ID_LENGTH and all(
-        char.isalnum() or char in "-_" for char in candidate
-    ):
+    if VIDEO_ID_RE.fullmatch(candidate):
         return candidate
 
     parsed = urlparse(candidate)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("That does not look like a valid YouTube URL or video ID.")
     host = parsed.netloc.lower()
     path_parts = [part for part in parsed.path.split("/") if part]
 
     if host in {"youtu.be", "www.youtu.be"} and path_parts:
         candidate_id = path_parts[0]
-        if len(candidate_id) == VIDEO_ID_LENGTH and all(
-            char.isalnum() or char in "-_" for char in candidate_id
-        ):
+        if VIDEO_ID_RE.fullmatch(candidate_id):
             return candidate_id
 
     if host in {
@@ -65,11 +115,7 @@ def extract_video_id(raw_value: str) -> str:
     }:
         if parsed.path == "/watch":
             video_id = parse_qs(parsed.query).get("v", [None])[0]
-            if (
-                video_id
-                and len(video_id) == VIDEO_ID_LENGTH
-                and all(char.isalnum() or char in "-_" for char in video_id)
-            ):
+            if video_id and VIDEO_ID_RE.fullmatch(video_id):
                 return video_id
         if (
             path_parts
@@ -77,9 +123,7 @@ def extract_video_id(raw_value: str) -> str:
             and len(path_parts) > 1
         ):
             candidate_id = path_parts[1]
-            if len(candidate_id) == VIDEO_ID_LENGTH and all(
-                char.isalnum() or char in "-_" for char in candidate_id
-            ):
+            if VIDEO_ID_RE.fullmatch(candidate_id):
                 return candidate_id
 
     raise ValueError("That does not look like a valid YouTube URL or video ID.")
@@ -109,7 +153,7 @@ def normalize_languages(raw_languages: str) -> tuple[str, ...]:
 
 class TranscriptService:
     def __init__(self) -> None:
-        self.api = YouTubeTranscriptApi()
+        self.api = YouTubeTranscriptApi(http_client=_BoundedYouTubeSession())
 
     def fetch(
         self, source: str, preferred_languages: Iterable[str]
@@ -135,8 +179,8 @@ class TranscriptService:
         except Exception as fallback_error:
             raise TranscriptRetrievalError(
                 "Transcript extraction failed with both backends.\n\n"
-                f"Primary backend error:\n{primary_error}\n\n"
-                f"Fallback backend error:\n{fallback_error}"
+                f"Primary backend error: {type(primary_error).__name__}.\n"
+                f"Fallback backend error: {type(fallback_error).__name__}."
             ) from fallback_error
 
     def _fetch_with_youtube_transcript_api(
@@ -148,14 +192,16 @@ class TranscriptService:
         transcript_list = self.api.list(video_id)
         transcript = self._select_transcript(transcript_list, preferred_languages)
         fetched = transcript.fetch()
-        segments = tuple(
-            TranscriptSegment(
-                text=clean_whitespace(item.text),
-                start=item.start,
-                duration=item.duration,
+        segments = self._normalize_segments(
+            tuple(
+                TranscriptSegment(
+                    text=clean_whitespace(item.text),
+                    start=item.start,
+                    duration=item.duration,
+                )
+                for item in fetched
+                if clean_whitespace(item.text)
             )
-            for item in fetched
-            if clean_whitespace(item.text)
         )
         if not segments:
             raise TranscriptRetrievalError(
@@ -176,7 +222,7 @@ class TranscriptService:
             language_code=getattr(transcript, "language_code", "unknown"),
             language_name=getattr(transcript, "language", "Unknown"),
             is_generated=bool(getattr(transcript, "is_generated", False)),
-            duration_seconds=segments[-1].end if segments else 0.0,
+            duration_seconds=_duration_seconds(segments),
             word_count=len(transcript_text.split()),
             video_title=self._fetch_video_title(source_url),
         )
@@ -213,7 +259,7 @@ class TranscriptService:
             language_code=language_code,
             language_name=language_name,
             is_generated=is_generated,
-            duration_seconds=segments[-1].end if segments else 0.0,
+            duration_seconds=_duration_seconds(segments),
             word_count=len(transcript_text.split()),
             video_title=clean_whitespace(str(info.get("title") or ""))
             or self._fetch_video_title(source_url),
@@ -270,6 +316,7 @@ class TranscriptService:
             "quiet": True,
             "no_warnings": True,
             "extract_flat": False,
+            "socket_timeout": 20,
         }
         with yt_dlp.YoutubeDL(options) as downloader:
             return downloader.extract_info(source_url, download=False)
@@ -360,14 +407,14 @@ class TranscriptService:
     def _download_caption_segments(
         self, track_url: str, *, track_ext: str = ""
     ) -> tuple[TranscriptSegment, ...]:
-        response = self._get_response_with_retries(track_url, timeout=20)
-        raw_text = str(getattr(response, "text", "") or "")
+        response = self._get_response_with_retries(track_url, timeout=20, stream=True)
+        raw_text = self._read_caption_response(response)
         stripped = raw_text.lstrip()
         extension = track_ext.lower().lstrip(".")
 
         if extension == "json3" or not stripped or stripped.startswith("{"):
             try:
-                segments = self._segments_from_json3(response.json())
+                segments = self._segments_from_json3(json.loads(raw_text))
             except (TypeError, ValueError) as error:
                 raise TranscriptRetrievalError(
                     "The JSON caption track was not valid JSON3 data."
@@ -377,10 +424,14 @@ class TranscriptService:
         else:
             segments = self._segments_from_xml(raw_text)
 
+        normalized_segments = self._normalize_segments(segments)
         deduped_segments: list[TranscriptSegment] = []
-        for segment in segments:
-            if deduped_segments and deduped_segments[-1].text == segment.text:
+        seen_cues: set[tuple[str, float, float]] = set()
+        for segment in normalized_segments:
+            cue_key = (segment.text, segment.start, segment.duration)
+            if cue_key in seen_cues:
                 continue
+            seen_cues.add(cue_key)
             deduped_segments.append(segment)
 
         if not deduped_segments:
@@ -388,6 +439,90 @@ class TranscriptService:
                 "A caption track was found, but it did not contain usable transcript text."
             )
         return tuple(deduped_segments)
+
+    def _read_caption_response(self, response: requests.Response) -> str:
+        """Read a caption response incrementally under the byte ceiling."""
+        try:
+            headers = getattr(response, "headers", {})
+            content_length = headers.get("Content-Length") or headers.get(
+                "content-length"
+            )
+            try:
+                too_large = (
+                    content_length is not None
+                    and int(content_length) > MAX_CAPTION_PAYLOAD_BYTES
+                )
+            except (TypeError, ValueError):
+                too_large = False
+            if too_large:
+                raise TranscriptRetrievalError(
+                    "Caption track is too large to process safely."
+                )
+
+            iterator = getattr(response, "iter_content", None)
+            if callable(iterator):
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in iterator(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    if isinstance(chunk, str):
+                        chunk = chunk.encode("utf-8")
+                    total += len(chunk)
+                    if total > MAX_CAPTION_PAYLOAD_BYTES:
+                        raise TranscriptRetrievalError(
+                            "Caption track is too large to process safely."
+                        )
+                    chunks.append(chunk)
+                raw = b"".join(chunks)
+            else:
+                content = getattr(response, "content", None)
+                if content is None:
+                    content = str(getattr(response, "text", "") or "").encode("utf-8")
+                if isinstance(content, str):
+                    content = content.encode("utf-8")
+                if len(content) > MAX_CAPTION_PAYLOAD_BYTES:
+                    raise TranscriptRetrievalError(
+                        "Caption track is too large to process safely."
+                    )
+                raw = content
+            encoding = getattr(response, "encoding", None) or "utf-8-sig"
+            try:
+                return raw.decode(encoding)
+            except (LookupError, UnicodeDecodeError) as error:
+                raise TranscriptRetrievalError(
+                    "Caption track returned invalid text encoding."
+                ) from error
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+
+    def _normalize_segments(
+        self, segments: Iterable[TranscriptSegment]
+    ) -> tuple[TranscriptSegment, ...]:
+        normalized: list[TranscriptSegment] = []
+        for segment in segments:
+            try:
+                start = float(segment.start)
+                duration = float(segment.duration)
+            except (TypeError, ValueError):
+                continue
+            if (
+                not math.isfinite(start)
+                or not math.isfinite(duration)
+                or start < 0
+                or duration < 0
+                or not math.isfinite(start + duration)
+            ):
+                continue
+            text = clean_whitespace(str(segment.text or ""))
+            if text:
+                normalized.append(
+                    TranscriptSegment(text=text, start=start, duration=duration)
+                )
+        normalized.sort(key=lambda segment: (segment.start, segment.duration))
+        return tuple(normalized)
 
     def _segments_from_json3(self, payload: object) -> list[TranscriptSegment]:
         if not isinstance(payload, dict):
@@ -467,7 +602,7 @@ class TranscriptService:
     def _segments_from_xml(self, raw_text: str) -> list[TranscriptSegment]:
         try:
             root = ElementTree.fromstring(raw_text)
-        except ElementTree.ParseError as error:
+        except (ElementTree.ParseError, DefusedXmlException) as error:
             raise TranscriptRetrievalError(
                 "The caption track was neither JSON3, WebVTT, nor valid XML."
             ) from error
@@ -503,27 +638,22 @@ class TranscriptService:
         return segments
 
     def _fetch_video_title(self, source_url: str) -> str | None:
-        for attempt in range(3):
-            try:
-                response = requests.get(
-                    "https://www.youtube.com/oembed",
-                    params={"url": source_url, "format": "json"},
-                    timeout=10,
-                )
-                if response.ok:
-                    try:
-                        payload = response.json()
-                    except (TypeError, ValueError):
-                        return None
-                    title = payload.get("title")
-                    if isinstance(title, str) and title.strip():
-                        return title.strip()
-                    return None
-            except requests.RequestException:
-                if attempt == 2:
-                    return None
-                time.sleep(0.2 * (attempt + 1))
-        return None
+        try:
+            response = self._get_response_with_retries(
+                "https://www.youtube.com/oembed",
+                timeout=10,
+                stream=True,
+            )
+            payload = json.loads(self._read_caption_response(response))
+        except (
+            requests.RequestException,
+            TranscriptRetrievalError,
+            TypeError,
+            ValueError,
+        ):
+            return None
+        title = payload.get("title") if isinstance(payload, dict) else None
+        return title.strip() if isinstance(title, str) and title.strip() else None
 
     def _get_json_with_retries(
         self, url: str, timeout: float, retries: int = 3
@@ -544,16 +674,19 @@ class TranscriptService:
         return payload
 
     def _get_response_with_retries(
-        self, url: str, *, timeout: float, retries: int = 3
+        self, url: str, *, timeout: float, retries: int = 3, stream: bool = False
     ) -> requests.Response:
-        last_error: Exception | None = None
+        last_error: str | None = None
         for attempt in range(max(1, retries)):
             try:
-                response = requests.get(url, timeout=timeout)
+                response = requests.get(url, timeout=timeout, stream=stream)
                 response.raise_for_status()
                 return response
             except requests.RequestException as error:
-                last_error = error
+                status = getattr(getattr(error, "response", None), "status_code", None)
+                last_error = type(error).__name__
+                if status is not None:
+                    last_error += f" HTTP {status}"
                 if attempt < max(1, retries) - 1:
                     time.sleep(0.3 * (attempt + 1))
         raise TranscriptRetrievalError(
@@ -582,3 +715,7 @@ def _parse_caption_time(value: object) -> float:
     if not math.isfinite(parsed) or parsed < 0:
         raise ValueError("caption timestamp must be finite and non-negative")
     return parsed
+
+
+def _duration_seconds(segments: Iterable[TranscriptSegment]) -> float:
+    return max((segment.end for segment in segments), default=0.0)

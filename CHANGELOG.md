@@ -16,6 +16,8 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 ### Changed
 
+- Bound caption downloads before parsing, kept provider input data in escaped
+  JSON, and routed oversized LLM jobs to the local fallback.
 - Reworked the landing page around a clearer no-key value proposition.
 - Rebuilt the README with a 30-second quick start, generation-mode documentation, privacy notes, and current limitations.
 - Prevented dead or fabricated timestamp links for source-free demo and pasted-transcript inputs.

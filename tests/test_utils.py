@@ -24,6 +24,40 @@ def test_escape_html_text_neutralizes_untrusted_metadata() -> None:
     )
 
 
+def test_sanitize_untrusted_markdown_disables_links_images_and_html() -> None:
+    from youtube_study_tool.utils import sanitize_untrusted_markdown
+
+    safe = sanitize_untrusted_markdown(
+        "[phish](https://attacker.example) ![pixel](https://attacker.example/x) "
+        "<img src='https://attacker.example/y'>"
+    )
+
+    assert "attacker.example" not in safe
+    assert "phish" in safe and "pixel" in safe
+    assert "&lt;img" in safe
+
+
+def test_sanitize_untrusted_markdown_removes_reference_links() -> None:
+    from youtube_study_tool.utils import sanitize_untrusted_markdown
+
+    safe = sanitize_untrusted_markdown(
+        "[phish][target]\n\n[target]: https://attacker.example/secret"
+    )
+
+    assert "attacker.example" not in safe
+    assert "phish" in safe
+
+
+def test_sanitize_untrusted_markdown_removes_multiline_javascript_links() -> None:
+    from youtube_study_tool.utils import sanitize_untrusted_markdown
+
+    safe = sanitize_untrusted_markdown("[click\nhere](javascript:alert(1))")
+
+    assert "javascript:" not in safe
+    assert "alert" not in safe
+    assert "click" in safe and "here" in safe
+
+
 def test_select_key_passages_covers_short_lesson_instead_of_fixed_gap() -> None:
     passages = [
         Passage(text=f"Lesson point {index}", start=index * 10.0, end=index * 10.0 + 8)
@@ -50,3 +84,21 @@ def test_build_chunked_text_bounds_a_single_oversized_segment() -> None:
 
     assert chunks
     assert max(len(chunk) for chunk in chunks) <= 32
+
+
+def test_build_passages_bounds_a_single_oversized_segment() -> None:
+    from youtube_study_tool.utils import build_passages
+
+    passages = build_passages(
+        [TranscriptSegment("word " * 1000, 0, 1)], target_chars=32
+    )
+
+    assert passages
+    assert max(len(passage.text) for passage in passages) <= 32
+
+
+def test_tokenize_keeps_unicode_words() -> None:
+    from youtube_study_tool.utils import tokenize
+
+    assert "künstliche" in tokenize("Künstliche Intelligenz")
+    assert tokenize("神经网络") == ["神经网络"]
