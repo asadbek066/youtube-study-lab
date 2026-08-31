@@ -4,6 +4,7 @@ import pytest
 
 from youtube_study_tool.fallback import generate_fallback_bundle
 from youtube_study_tool.manual import build_manual_transcript
+from youtube_study_tool.models import MAX_TRANSCRIPT_CHARS
 
 
 def test_build_manual_transcript_normalizes_user_text() -> None:
@@ -26,6 +27,11 @@ def test_build_manual_transcript_normalizes_user_text() -> None:
 def test_build_manual_transcript_rejects_empty_text() -> None:
     with pytest.raises(ValueError, match="Paste transcript text"):
         build_manual_transcript("   ")
+
+
+def test_build_manual_transcript_rejects_oversized_text() -> None:
+    with pytest.raises(ValueError, match="Transcript is too long"):
+        build_manual_transcript("x" * (MAX_TRANSCRIPT_CHARS + 1))
 
 
 def test_manual_study_pack_contains_no_fabricated_timestamps() -> None:

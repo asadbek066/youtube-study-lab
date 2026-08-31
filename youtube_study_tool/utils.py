@@ -303,15 +303,28 @@ def build_chunked_text(
 
     for segment in segments:
         text = clean_whitespace(segment.text)
-        line = (
-            f"[{format_seconds(segment.start)}] {text}" if include_timestamps else text
-        )
-        if current_lines and current_length + len(line) + 1 > max_chars:
-            chunks.append("\n".join(current_lines))
-            current_lines = []
-            current_length = 0
-        current_lines.append(line)
-        current_length += len(line) + 1
+        if not text:
+            continue
+        prefix = f"[{format_seconds(segment.start)}] " if include_timestamps else ""
+        available = max_chars - len(prefix)
+        if available <= 0:
+            raise ValueError("max_chars must leave room for a transcript segment")
+        while text:
+            if len(text) <= available:
+                part = text
+                text = ""
+            else:
+                cut = text.rfind(" ", 0, available + 1)
+                cut = cut if cut > 0 else available
+                part = text[:cut].rstrip()
+                text = text[cut:].lstrip()
+            line = prefix + part
+            if current_lines and current_length + len(line) + 1 > max_chars:
+                chunks.append("\n".join(current_lines))
+                current_lines = []
+                current_length = 0
+            current_lines.append(line)
+            current_length += len(line) + 1
 
     if current_lines:
         chunks.append("\n".join(current_lines))

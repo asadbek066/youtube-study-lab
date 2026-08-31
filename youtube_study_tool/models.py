@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+MAX_TRANSCRIPT_CHARS = 500_000
+
 
 @dataclass(frozen=True)
 class TranscriptSegment:

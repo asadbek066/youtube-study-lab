@@ -16,8 +16,16 @@ from youtube_study_tool.demo import build_demo_transcript
 from youtube_study_tool.fallback import generate_fallback_bundle
 from youtube_study_tool.generation import StudyPackGenerator
 from youtube_study_tool.manual import build_manual_transcript
-from youtube_study_tool.models import AnalysisBundle, TranscriptBundle
-from youtube_study_tool.transcripts import TranscriptService, normalize_languages
+from youtube_study_tool.models import (
+    MAX_TRANSCRIPT_CHARS,
+    AnalysisBundle,
+    TranscriptBundle,
+)
+from youtube_study_tool.transcripts import (
+    TranscriptRetrievalError,
+    TranscriptService,
+    normalize_languages,
+)
 from youtube_study_tool.utils import (
     escape_html_text,
     format_seconds,
@@ -339,6 +347,7 @@ def run() -> None:
                 "Transcript text",
                 placeholder="Paste public or personal transcript text here...",
                 height=180,
+                max_chars=MAX_TRANSCRIPT_CHARS,
                 key="manual-transcript",
             )
             manual_submitted = st.form_submit_button(
@@ -372,6 +381,7 @@ def run() -> None:
             NoTranscriptFound,
             TranscriptsDisabled,
             CouldNotRetrieveTranscript,
+            TranscriptRetrievalError,
             YouTubeTranscriptApiException,
         ) as error:
             st.error(f"Transcript extraction failed: {error}")

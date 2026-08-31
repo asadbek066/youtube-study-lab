@@ -97,3 +97,23 @@ def test_fallback_summary_preserves_intermediate_steps_in_short_lesson() -> None
 
     for concept in ("loss function", "Backpropagation", "Gradient descent"):
         assert concept in analysis.summary
+
+
+def test_fallback_handles_a_low_vocabulary_transcript() -> None:
+    bundle = TranscriptBundle(
+        video_id="abc123xyz00",
+        source_url="",
+        transcript_text="A test.",
+        segments=(TranscriptSegment(text="A test.", start=0, duration=0),),
+        language_code="und",
+        language_name="Unknown",
+        is_generated=False,
+        duration_seconds=0,
+        word_count=2,
+    )
+
+    analysis = generate_fallback_bundle(bundle)
+
+    assert "## Summary" in analysis.summary
+    assert "## Study Notes" in analysis.study_notes
+    assert "## Quiz" in analysis.quiz

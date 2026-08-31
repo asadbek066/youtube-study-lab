@@ -190,7 +190,7 @@ def _build_overview(passages: list[Passage]) -> str:
 
 
 def _motivational_takeaways(keywords: list[str]) -> list[str]:
-    anchors = keywords[:3] or ["discipline", "action", "focus"]
+    anchors = _padded_anchors(keywords, ("discipline", "action", "focus"))
     return [
         f"Translate `{anchors[0]}` into one concrete habit you can repeat this week.",
         f"Notice where `{anchors[1]}` shows up as a practical rather than purely emotional idea.",
@@ -256,7 +256,7 @@ def _build_common_mistakes(passages: list[Passage], keywords: list[str]) -> list
             "No reliable misconceptions could be inferred from the transcript content."
         ]
 
-    anchors = keywords[:3] or ["main idea", "sequence", "example"]
+    anchors = _padded_anchors(keywords, ("main idea", "sequence", "example"))
     mistakes = [
         f"Do not mistake side remarks for the main claim around `{anchors[0]}`.",
         f"Do not skip the order of ideas, especially where `{anchors[1]}` appears.",
@@ -280,13 +280,13 @@ def _build_practical_takeaways(
     if content_style == "motivational":
         return _motivational_takeaways(keywords)
     if content_style == "tutorial":
-        anchors = keywords[:3] or ["setup", "build", "review"]
+        anchors = _padded_anchors(keywords, ("setup", "build", "review"))
         return [
             f"Use `{anchors[0]}` as an early checkpoint before moving forward.",
             f"Revisit `{anchors[1]}` when practicing to reinforce implementation choices.",
             f"Review `{anchors[2]}` at the end to lock in the full sequence.",
         ]
-    anchors = keywords[:3] or ["main idea", "example", "sequence"]
+    anchors = _padded_anchors(keywords, ("main idea", "example", "sequence"))
     takeaways = [
         f"Treat `{anchors[0]}` as one of the key recurring concepts.",
         f"Use `{anchors[1]}` to explain the topic back in your own words.",
@@ -297,6 +297,13 @@ def _build_practical_takeaways(
             "Review the opening explanation first, then the later supporting details in order."
         )
     return takeaways[:4]
+
+
+def _padded_anchors(keywords: list[str], defaults: tuple[str, str, str]) -> list[str]:
+    """Always provide three safe anchors, even for a one-word transcript."""
+    anchors = list(keywords[:3])
+    anchors.extend(default for default in defaults if len(anchors) < 3)
+    return anchors
 
 
 def _build_what_to_remember(passages: list[Passage], keywords: list[str]) -> list[str]:
@@ -439,7 +446,7 @@ def _build_short_answer_questions(
     passages: list[Passage],
     keywords: list[str],
 ) -> list[list[str]]:
-    anchors = keywords[:3] or ["main idea", "supporting detail", "sequence"]
+    anchors = _padded_anchors(keywords, ("main idea", "supporting detail", "sequence"))
     details = passages[:3]
     compressed = _build_compressed_paragraph(passages)
     misconceptions = _build_common_mistakes(passages, keywords)
@@ -484,7 +491,7 @@ def _build_application_questions(
     keywords: list[str],
     content_style: str,
 ) -> list[list[str]]:
-    anchors = keywords[:3] or ["core idea", "sequence", "example"]
+    anchors = _padded_anchors(keywords, ("core idea", "sequence", "example"))
     first_step = passages[0].text if passages else _build_topic(bundle, passages)
     later_step = passages[1].text if len(passages) > 1 else first_step
 
