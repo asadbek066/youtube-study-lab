@@ -2,7 +2,11 @@ import re
 
 from youtube_study_tool.classification import heuristic_classification
 from youtube_study_tool.demo import build_demo_transcript
-from youtube_study_tool.generation import CHUNK_PROMPT, StudyPackGenerator
+from youtube_study_tool.generation import (
+    CHUNK_PROMPT,
+    MAX_FINAL_EVIDENCE_CHARS,
+    StudyPackGenerator,
+)
 from youtube_study_tool.manual import build_manual_transcript
 
 
@@ -45,3 +49,12 @@ def test_timed_video_retains_timecodes_in_llm_prompts(monkeypatch) -> None:
 
     assert any("[00:00]" in prompt for prompt in prompts)
     assert any("Approximate duration:" in prompt for prompt in prompts)
+
+
+def test_final_synthesis_evidence_is_bounded() -> None:
+    from youtube_study_tool.generation import _bound_final_evidence
+
+    bounded = _bound_final_evidence("x" * (MAX_FINAL_EVIDENCE_CHARS + 100))
+
+    assert len(bounded) <= MAX_FINAL_EVIDENCE_CHARS + 80
+    assert "omitted for context safety" in bounded

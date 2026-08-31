@@ -27,6 +27,7 @@ from youtube_study_tool.utils import build_chunked_text, format_seconds
 SECTION_RE = re.compile(
     r"<(?P<name>summary|study_notes|quiz)>\s*(?P<body>.*?)\s*</\1>", re.DOTALL
 )
+MAX_FINAL_EVIDENCE_CHARS = 60_000
 logger = logging.getLogger(__name__)
 
 LEARNING_ASSISTANT_PROMPT = """
@@ -125,6 +126,7 @@ class StudyPackGenerator:
             f"Excerpt {index + 1} summary:\n{summary}"
             for index, summary in enumerate(chunk_summaries)
         )
+        source_text = _bound_final_evidence(source_text)
         metadata_lines = [
             f"Video title: {bundle.video_title or 'Unknown'}",
             f"Transcript length: {bundle.word_count} words",
@@ -288,6 +290,18 @@ def _parse_sections(response_text: str) -> dict[str, str]:
     for match in SECTION_RE.finditer(response_text):
         sections[match.group("name")] = match.group("body").strip()
     return sections
+
+
+def _bound_final_evidence(
+    source_text: str, max_chars: int = MAX_FINAL_EVIDENCE_CHARS
+) -> str:
+    """Keep the final synthesis prompt within a predictable context budget."""
+    if len(source_text) <= max_chars:
+        return source_text
+    return (
+        source_text[:max_chars].rstrip()
+        + "\n\n[Further chunk summaries omitted for context safety.]"
+    )
 
 
 def _build_final_prompt(

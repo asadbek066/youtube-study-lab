@@ -1,4 +1,6 @@
+from youtube_study_tool.models import MAX_TRANSCRIPT_CHARS
 from youtube_study_tool.transcripts import (
+    TranscriptRetrievalError,
     TranscriptService,
     extract_video_id,
     normalize_languages,
@@ -21,6 +23,50 @@ def test_normalize_languages_defaults_to_english() -> None:
 
 def test_normalize_languages_filters_invalid_and_dedupes() -> None:
     assert normalize_languages("en,en,  ,xx_yy,uz,EN") == ("en", "uz")
+
+
+def test_fetch_rejects_oversized_primary_transcript(monkeypatch) -> None:
+    class DummyTranscript:
+        language_code = "en"
+        language = "English"
+        is_generated = False
+
+        def fetch(self):
+            return [
+                type(
+                    "Caption",
+                    (),
+                    {
+                        "text": "x" * (MAX_TRANSCRIPT_CHARS + 1),
+                        "start": 0.0,
+                        "duration": 1.0,
+                    },
+                )()
+            ]
+
+    class DummyTranscriptList:
+        def find_transcript(self, _languages):
+            return DummyTranscript()
+
+        def __iter__(self):
+            return iter((DummyTranscript(),))
+
+    service = TranscriptService()
+    service.api = type(
+        "DummyApi",
+        (),
+        {"list": lambda _self, _video_id: DummyTranscriptList()},
+    )()
+    monkeypatch.setattr(service, "_fetch_video_title", lambda _source_url: None)
+
+    try:
+        service._fetch_with_youtube_transcript_api(
+            "dQw4w9WgXcQ", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", ("en",)
+        )
+    except TranscriptRetrievalError as error:
+        assert "Transcript is too long" in str(error)
+    else:
+        raise AssertionError("oversized transcript was accepted")
 
 
 def test_download_caption_segments_parses_json3_payload(monkeypatch) -> None:
@@ -86,6 +132,54 @@ Next line
         ("Hello world", 0.0, 1.2),
         ("Next line", 1.2, 0.8),
     ]
+
+
+def test_download_caption_segments_parses_srt(monkeypatch) -> None:
+    class DummyResponse:
+        text = """1
+00:00:00,000 --> 00:00:01,200
+Hello world
+
+2
+00:00:01,200 --> 00:00:02,000
+Next line
+"""
+
+        def raise_for_status(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "youtube_study_tool.transcripts.requests.get",
+        lambda *args, **kwargs: DummyResponse(),
+    )
+
+    segments = TranscriptService()._download_caption_segments(
+        "https://example.com/captions.srt", track_ext="srt"
+    )
+
+    assert [segment.text for segment in segments] == ["Hello world", "Next line"]
+    assert segments[0].duration == 1.2
+
+
+def test_caption_parser_skips_non_finite_timestamps() -> None:
+    segments = TranscriptService()._segments_from_json3(
+        {
+            "events": [
+                {
+                    "tStartMs": "NaN",
+                    "dDurationMs": 1000,
+                    "segs": [{"utf8": "bad"}],
+                },
+                {
+                    "tStartMs": 0,
+                    "dDurationMs": 1000,
+                    "segs": [{"utf8": "good"}],
+                },
+            ]
+        }
+    )
+
+    assert [segment.text for segment in segments] == ["good"]
 
 
 def test_download_caption_segments_parses_srv_xml(monkeypatch) -> None:

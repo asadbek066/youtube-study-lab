@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from collections.abc import Iterable
@@ -17,7 +18,11 @@ from youtube_transcript_api import (
     YouTubeTranscriptApi,
 )
 
-from youtube_study_tool.models import TranscriptBundle, TranscriptSegment
+from youtube_study_tool.models import (
+    MAX_TRANSCRIPT_CHARS,
+    TranscriptBundle,
+    TranscriptSegment,
+)
 from youtube_study_tool.utils import clean_whitespace
 
 VIDEO_ID_LENGTH = 11
@@ -152,18 +157,27 @@ class TranscriptService:
             for item in fetched
             if clean_whitespace(item.text)
         )
+        if not segments:
+            raise TranscriptRetrievalError(
+                "A transcript track was returned, but it contained no usable text."
+            )
+        transcript_text = clean_whitespace(
+            " ".join(segment.text for segment in segments)
+        )
+        if len(transcript_text) > MAX_TRANSCRIPT_CHARS:
+            raise TranscriptRetrievalError(
+                f"Transcript is too long; keep it under {MAX_TRANSCRIPT_CHARS:,} characters."
+            )
         return TranscriptBundle(
             video_id=video_id,
             source_url=source_url,
-            transcript_text=clean_whitespace(
-                " ".join(segment.text for segment in segments)
-            ),
+            transcript_text=transcript_text,
             segments=segments,
             language_code=getattr(transcript, "language_code", "unknown"),
             language_name=getattr(transcript, "language", "Unknown"),
             is_generated=bool(getattr(transcript, "is_generated", False)),
             duration_seconds=segments[-1].end if segments else 0.0,
-            word_count=len(" ".join(segment.text for segment in segments).split()),
+            word_count=len(transcript_text.split()),
             video_title=self._fetch_video_title(source_url),
         )
 
@@ -187,6 +201,10 @@ class TranscriptService:
         transcript_text = clean_whitespace(
             " ".join(segment.text for segment in segments)
         )
+        if len(transcript_text) > MAX_TRANSCRIPT_CHARS:
+            raise TranscriptRetrievalError(
+                f"Transcript is too long; keep it under {MAX_TRANSCRIPT_CHARS:,} characters."
+            )
         return TranscriptBundle(
             video_id=video_id,
             source_url=source_url,
@@ -321,7 +339,15 @@ class TranscriptService:
     def _pick_track(self, tracks: list[dict]) -> dict | None:
         if not tracks:
             return None
-        preferred_extensions = ("json3", "srv3", "srv2", "srv1", "vtt", "ttml")
+        preferred_extensions = (
+            "json3",
+            "srv3",
+            "srv2",
+            "srv1",
+            "vtt",
+            "srt",
+            "ttml",
+        )
         for extension in preferred_extensions:
             for track in tracks:
                 if track.get("ext") == extension and track.get("url"):
@@ -346,7 +372,7 @@ class TranscriptService:
                 raise TranscriptRetrievalError(
                     "The JSON caption track was not valid JSON3 data."
                 ) from error
-        elif extension == "vtt" or stripped.startswith("WEBVTT"):
+        elif extension in {"srt", "vtt"} or stripped.startswith("WEBVTT"):
             segments = self._segments_from_vtt(raw_text)
         else:
             segments = self._segments_from_xml(raw_text)
@@ -381,13 +407,20 @@ class TranscriptService:
             if not text:
                 continue
             try:
-                start = float(event.get("tStartMs", 0)) / 1000.0
-                duration = float(event.get("dDurationMs", 0)) / 1000.0
+                start_ms = float(event.get("tStartMs", 0))
+                duration_ms = float(event.get("dDurationMs", 0))
             except (TypeError, ValueError):
+                continue
+            if (
+                not math.isfinite(start_ms)
+                or not math.isfinite(duration_ms)
+                or start_ms < 0
+                or duration_ms < 0
+            ):
                 continue
             segments.append(
                 TranscriptSegment(
-                    text=text, start=max(start, 0.0), duration=max(duration, 0.0)
+                    text=text, start=start_ms / 1000.0, duration=duration_ms / 1000.0
                 )
             )
         return segments
@@ -460,6 +493,8 @@ class TranscriptService:
                     duration = _parse_caption_time(duration_raw or "0")
             except ValueError:
                 continue
+            if duration < 0:
+                continue
             segments.append(
                 TranscriptSegment(
                     text=text, start=max(start, 0.0), duration=max(duration, 0.0)
@@ -476,7 +511,10 @@ class TranscriptService:
                     timeout=10,
                 )
                 if response.ok:
-                    payload = response.json()
+                    try:
+                        payload = response.json()
+                    except (TypeError, ValueError):
+                        return None
                     title = payload.get("title")
                     if isinstance(title, str) and title.strip():
                         return title.strip()
@@ -528,14 +566,19 @@ def _parse_caption_time(value: object) -> float:
     if not text:
         raise ValueError("empty caption timestamp")
     if text.endswith("ms"):
-        return float(text[:-2]) / 1000.0
-    if text.endswith("s"):
-        return float(text[:-1])
-    parts = text.split(":")
-    if len(parts) == 3:
-        hours, minutes, seconds = (float(part) for part in parts)
-        return hours * 3600 + minutes * 60 + seconds
-    if len(parts) == 2:
-        minutes, seconds = (float(part) for part in parts)
-        return minutes * 60 + seconds
-    return float(text)
+        parsed = float(text[:-2]) / 1000.0
+    elif text.endswith("s"):
+        parsed = float(text[:-1])
+    else:
+        parts = text.split(":")
+        if len(parts) == 3:
+            hours, minutes, seconds = (float(part) for part in parts)
+            parsed = hours * 3600 + minutes * 60 + seconds
+        elif len(parts) == 2:
+            minutes, seconds = (float(part) for part in parts)
+            parsed = minutes * 60 + seconds
+        else:
+            parsed = float(text)
+    if not math.isfinite(parsed) or parsed < 0:
+        raise ValueError("caption timestamp must be finite and non-negative")
+    return parsed

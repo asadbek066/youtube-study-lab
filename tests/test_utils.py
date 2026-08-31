@@ -43,3 +43,10 @@ def test_select_key_passages_covers_short_lesson_instead_of_fixed_gap() -> None:
 
 def test_select_key_passages_handles_non_positive_limit() -> None:
     assert select_key_passages([Passage("point", 0, 1)], limit=0) == []
+
+
+def test_build_chunked_text_bounds_a_single_oversized_segment() -> None:
+    chunks = build_chunked_text([TranscriptSegment("word " * 100, 0, 1)], max_chars=32)
+
+    assert chunks
+    assert max(len(chunk) for chunk in chunks) <= 32
