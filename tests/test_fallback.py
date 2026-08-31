@@ -1,3 +1,4 @@
+from youtube_study_tool.demo import build_demo_transcript
 from youtube_study_tool.fallback import generate_fallback_bundle
 from youtube_study_tool.models import TranscriptBundle, TranscriptSegment
 
@@ -89,3 +90,10 @@ def test_generate_fallback_bundle_uses_tutorial_shape() -> None:
 
     assert "### 3. Step-by-step breakdown" in analysis.summary
     assert analysis.classification.video_type in {"tutorial", "coding walkthrough"}
+
+
+def test_fallback_summary_preserves_intermediate_steps_in_short_lesson() -> None:
+    analysis = generate_fallback_bundle(build_demo_transcript())
+
+    for concept in ("loss function", "Backpropagation", "Gradient descent"):
+        assert concept in analysis.summary

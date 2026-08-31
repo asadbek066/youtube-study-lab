@@ -19,7 +19,10 @@ from youtube_study_tool.utils import (
 def generate_fallback_bundle(bundle: TranscriptBundle) -> AnalysisBundle:
     classification = heuristic_classification(bundle)
     passages = build_passages(bundle.segments)
-    key_passages = _deduplicate_passages(select_key_passages(passages, limit=5))
+    # Keep enough coverage for short lessons to retain the explanation's
+    # intermediate steps; longer transcripts are still reduced to eight
+    # representative passages.
+    key_passages = _deduplicate_passages(select_key_passages(passages, limit=8))
     quiz_passages = _quiz_passages(bundle, passages)
     keywords = [
         keyword
@@ -172,7 +175,7 @@ def _build_important_details(passages: list[Passage]) -> list[str]:
     if not passages:
         return ["There was not enough transcript detail to produce reliable notes."]
     details: list[str] = []
-    for passage in passages[:4]:
+    for passage in passages:
         details.append(passage.text)
     return details
 
@@ -196,7 +199,7 @@ def _motivational_takeaways(keywords: list[str]) -> list[str]:
 
 
 def _build_main_ideas(passages: list[Passage]) -> list[str]:
-    return [passage.text for passage in passages[:4]] or [
+    return [passage.text for passage in passages] or [
         "There was not enough transcript content to identify the main ideas."
     ]
 
@@ -205,7 +208,7 @@ def _build_step_breakdown(
     bundle: TranscriptBundle, passages: list[Passage]
 ) -> list[str]:
     steps: list[str] = []
-    for passage in passages[:4]:
+    for passage in passages:
         reference = (
             timestamp_reference(
                 bundle.video_id,

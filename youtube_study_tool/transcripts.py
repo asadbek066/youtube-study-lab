@@ -4,7 +4,9 @@ import logging
 import re
 import time
 from collections.abc import Iterable
+from html import unescape
 from urllib.parse import parse_qs, urlparse
+from xml.etree import ElementTree
 
 import requests
 import yt_dlp
@@ -179,7 +181,9 @@ class TranscriptService:
             automatic_captions,
             preferred_languages,
         )
-        segments = self._download_caption_segments(track["url"])
+        segments = self._download_caption_segments(
+            track["url"], track_ext=str(track.get("ext") or "")
+        )
         transcript_text = clean_whitespace(
             " ".join(segment.text for segment in segments)
         )
@@ -328,29 +332,24 @@ class TranscriptService:
         return None
 
     def _download_caption_segments(
-        self, track_url: str
+        self, track_url: str, *, track_ext: str = ""
     ) -> tuple[TranscriptSegment, ...]:
-        payload = self._get_json_with_retries(track_url, timeout=20)
-        segments: list[TranscriptSegment] = []
+        response = self._get_response_with_retries(track_url, timeout=20)
+        raw_text = str(getattr(response, "text", "") or "")
+        stripped = raw_text.lstrip()
+        extension = track_ext.lower().lstrip(".")
 
-        for event in payload.get("events", []):
-            text_parts = []
-            for segment in event.get("segs", []) or []:
-                text = clean_whitespace(str(segment.get("utf8") or ""))
-                if text:
-                    text_parts.append(text)
-            if not text_parts:
-                continue
-
-            text = clean_whitespace(" ".join(text_parts))
-            if not text:
-                continue
-
-            start = float(event.get("tStartMs", 0)) / 1000.0
-            duration = float(event.get("dDurationMs", 0)) / 1000.0
-            segments.append(
-                TranscriptSegment(text=text, start=start, duration=max(duration, 0.0))
-            )
+        if extension == "json3" or not stripped or stripped.startswith("{"):
+            try:
+                segments = self._segments_from_json3(response.json())
+            except (TypeError, ValueError) as error:
+                raise TranscriptRetrievalError(
+                    "The JSON caption track was not valid JSON3 data."
+                ) from error
+        elif extension == "vtt" or stripped.startswith("WEBVTT"):
+            segments = self._segments_from_vtt(raw_text)
+        else:
+            segments = self._segments_from_xml(raw_text)
 
         deduped_segments: list[TranscriptSegment] = []
         for segment in segments:
@@ -363,6 +362,110 @@ class TranscriptService:
                 "A caption track was found, but it did not contain usable transcript text."
             )
         return tuple(deduped_segments)
+
+    def _segments_from_json3(self, payload: object) -> list[TranscriptSegment]:
+        if not isinstance(payload, dict):
+            raise TypeError("JSON3 payload must be an object")
+        segments: list[TranscriptSegment] = []
+        for event in payload.get("events", []) or []:
+            if not isinstance(event, dict):
+                continue
+            text_parts = []
+            for item in event.get("segs", []) or []:
+                if not isinstance(item, dict):
+                    continue
+                text = clean_whitespace(str(item.get("utf8") or ""))
+                if text:
+                    text_parts.append(text)
+            text = clean_whitespace(" ".join(text_parts))
+            if not text:
+                continue
+            try:
+                start = float(event.get("tStartMs", 0)) / 1000.0
+                duration = float(event.get("dDurationMs", 0)) / 1000.0
+            except (TypeError, ValueError):
+                continue
+            segments.append(
+                TranscriptSegment(
+                    text=text, start=max(start, 0.0), duration=max(duration, 0.0)
+                )
+            )
+        return segments
+
+    def _segments_from_vtt(self, raw_text: str) -> list[TranscriptSegment]:
+        segments: list[TranscriptSegment] = []
+        start: float | None = None
+        end: float | None = None
+        cue_lines: list[str] = []
+
+        def flush() -> None:
+            nonlocal start, end, cue_lines
+            if start is not None and end is not None:
+                text = clean_whitespace(
+                    re.sub(r"<[^>]+>", "", unescape(" ".join(cue_lines)))
+                )
+                if text:
+                    segments.append(
+                        TranscriptSegment(
+                            text=text,
+                            start=max(start, 0.0),
+                            duration=max(end - start, 0.0),
+                        )
+                    )
+            start = end = None
+            cue_lines = []
+
+        for line in [*raw_text.splitlines(), ""]:
+            match = re.match(r"^\s*(\S+)\s+-->\s+(\S+)", line)
+            if match:
+                flush()
+                try:
+                    start = _parse_caption_time(match.group(1))
+                    end = _parse_caption_time(match.group(2))
+                except ValueError:
+                    start = end = None
+                continue
+            if not line.strip():
+                flush()
+            elif start is not None:
+                cue_lines.append(line.strip())
+        return segments
+
+    def _segments_from_xml(self, raw_text: str) -> list[TranscriptSegment]:
+        try:
+            root = ElementTree.fromstring(raw_text)
+        except ElementTree.ParseError as error:
+            raise TranscriptRetrievalError(
+                "The caption track was neither JSON3, WebVTT, nor valid XML."
+            ) from error
+
+        segments: list[TranscriptSegment] = []
+        for element in root.iter():
+            tag = element.tag.rsplit("}", 1)[-1]
+            if tag not in {"text", "p"}:
+                continue
+            text = clean_whitespace("".join(element.itertext()))
+            if not text:
+                continue
+            start_raw = (
+                element.attrib.get("start") or element.attrib.get("begin") or "0"
+            )
+            end_raw = element.attrib.get("end")
+            duration_raw = element.attrib.get("dur") or element.attrib.get("duration")
+            try:
+                start = _parse_caption_time(start_raw)
+                if end_raw is not None:
+                    duration = _parse_caption_time(end_raw) - start
+                else:
+                    duration = _parse_caption_time(duration_raw or "0")
+            except ValueError:
+                continue
+            segments.append(
+                TranscriptSegment(
+                    text=text, start=max(start, 0.0), duration=max(duration, 0.0)
+                )
+            )
+        return segments
 
     def _fetch_video_title(self, source_url: str) -> str | None:
         for attempt in range(3):
@@ -387,25 +490,52 @@ class TranscriptService:
     def _get_json_with_retries(
         self, url: str, timeout: float, retries: int = 3
     ) -> dict:
+        response = self._get_response_with_retries(
+            url, timeout=timeout, retries=retries
+        )
+        try:
+            payload = response.json()
+        except (TypeError, ValueError) as error:
+            raise TranscriptRetrievalError(
+                "Caption endpoint returned invalid JSON."
+            ) from error
+        if not isinstance(payload, dict):
+            raise TranscriptRetrievalError(
+                "Caption endpoint returned a non-object JSON payload."
+            )
+        return payload
+
+    def _get_response_with_retries(
+        self, url: str, *, timeout: float, retries: int = 3
+    ) -> requests.Response:
         last_error: Exception | None = None
-        for attempt in range(retries):
+        for attempt in range(max(1, retries)):
             try:
                 response = requests.get(url, timeout=timeout)
                 response.raise_for_status()
-                payload = response.json()
-                if not isinstance(payload, dict):
-                    raise TranscriptRetrievalError(
-                        "Caption endpoint returned a non-object JSON payload."
-                    )
-                return payload
-            except (
-                requests.RequestException,
-                ValueError,
-                TranscriptRetrievalError,
-            ) as error:
+                return response
+            except requests.RequestException as error:
                 last_error = error
-                if attempt < retries - 1:
+                if attempt < max(1, retries) - 1:
                     time.sleep(0.3 * (attempt + 1))
         raise TranscriptRetrievalError(
             f"Failed to download caption track after {retries} attempts: {last_error}"
         )
+
+
+def _parse_caption_time(value: object) -> float:
+    text = str(value).strip().replace(",", ".")
+    if not text:
+        raise ValueError("empty caption timestamp")
+    if text.endswith("ms"):
+        return float(text[:-2]) / 1000.0
+    if text.endswith("s"):
+        return float(text[:-1])
+    parts = text.split(":")
+    if len(parts) == 3:
+        hours, minutes, seconds = (float(part) for part in parts)
+        return hours * 3600 + minutes * 60 + seconds
+    if len(parts) == 2:
+        minutes, seconds = (float(part) for part in parts)
+        return minutes * 60 + seconds
+    return float(text)
