@@ -69,8 +69,8 @@ Open the local URL and use the same instant-demo flow.
 | --- | --- |
 | **Structured summary** | A fast overview, main ideas, examples, takeaways, and timestamp links when the source is a video |
 | **Study notes** | Revision-friendly concepts, terminology, examples, and review prompts |
-| **18-question quiz** | Multiple-choice, true/false, short-answer, and scenario questions |
-| **Classification** | Content type, difficulty, audience, prerequisites, and suggested next steps |
+| **18-question quiz** | Multiple-choice, short-answer, and application questions |
+| **Classification** | Content type, confidence, and recommended summary/note styles |
 | **Transcript** | The normalized caption text and source metadata |
 | **Markdown export** | One portable file containing the complete study pack |
 
@@ -89,7 +89,7 @@ If YouTube blocks transcript requests from your machine or hosting provider, ope
 
 ![YouTube Study Lab architecture](docs/assets/architecture.svg)
 
-YouTube sources pass through language-aware transcript retrieval; pasted text goes directly to normalization. Long transcripts are split into overlapping chunks. Each chunk is processed independently, then the results are merged and deduplicated into one study pack. Video sources retain timestamp links; pasted text does not receive fabricated timestamps.
+YouTube sources pass through language-aware transcript retrieval; pasted text goes directly to normalization. Long transcripts are split into bounded chunks. Each chunk is processed independently, then the results are merged and deduplicated into one study pack. Video sources retain timestamp links; pasted text does not receive fabricated timestamps.
 
 ## Generation modes
 
@@ -99,7 +99,7 @@ The default mode works without a model API key.
 | --- | --- | --- |
 | **Local heuristic** | No setup required | Deterministic, private after transcript retrieval, and ideal for trying the app |
 | **OpenAI** | `LLM_PROVIDER=openai` | Uses an OpenAI model configured through `.env` |
-| **Azure OpenAI** | `LLM_PROVIDER=azure_openai` | Uses your Azure endpoint, deployment, and API version |
+| **Azure OpenAI** | `LLM_PROVIDER=azure_openai` | Uses your Azure endpoint and deployment |
 | **Gemini** | `LLM_PROVIDER=gemini` | Uses a Google Gemini model configured through `.env` |
 
 To configure an API provider:
@@ -125,7 +125,7 @@ Useful settings from `.env.example` include:
 - `LLM_PROVIDER`: `heuristic`, `openai`, `azure_openai`, or `gemini`
 - Provider model/deployment and API credentials
 - `SUMMARY_STYLE` and `SUMMARY_DETAIL`
-- Chunk size, overlap, output-token limit, and retry controls
+- Output-token limits for the configured provider
 
 The app validates numeric bounds and automatically falls back to local generation when a configured provider is unavailable.
 
@@ -148,7 +148,14 @@ The GitHub Actions workflow runs lint, formatting, and the test suite on Python 
 - Videos without public captions cannot be fetched automatically; users can still paste transcript text.
 - YouTube may throttle or block transcript requests from some hosted environments, which is why the app includes the pasted-transcript fallback.
 - Local heuristic generation prioritizes reliability and zero setup over model-level prose quality.
-- Very long videos take longer because they are processed in chunks.
+- Inputs that would require more than 8 provider chunks use the bounded local
+  fallback instead of multiplying paid generation calls.
+- API-provider generation is capped at 10 calls per pack and three paid
+  submissions per Streamlit session. This is a safety ceiling, not an
+  account-wide rate limiter or spend guarantee.
+- Provider output passes format, source-vocabulary, and citation-link checks;
+  those checks reduce obvious fabrication but are not an independent factual
+  verification system.
 
 ## Contributing
 
