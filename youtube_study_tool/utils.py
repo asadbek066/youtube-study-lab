@@ -261,14 +261,31 @@ def rank_passages(passages: Sequence[Passage]) -> list[tuple[Passage, float]]:
 
 
 def select_key_passages(passages: Sequence[Passage], limit: int = 5) -> list[Passage]:
+    if limit <= 0 or not passages:
+        return []
+    if len(passages) <= limit:
+        return list(passages)
+
     ranked = rank_passages(passages)
     chosen: list[Passage] = []
+    span = max(0.0, passages[-1].start - passages[0].start)
+    # Keep salient passages spread across the source.  A fixed gap makes a
+    # short lesson collapse to its opening and closing lines, hiding the
+    # middle of the explanation from the generated summary.
+    min_gap = max(1.0, span / max(limit - 1, 1))
     for passage, _score in ranked:
-        if any(abs(existing.start - passage.start) < 45 for existing in chosen):
+        if any(abs(existing.start - passage.start) < min_gap for existing in chosen):
             continue
         chosen.append(passage)
         if len(chosen) >= limit:
             break
+    if len(chosen) < limit:
+        for passage, _score in ranked:
+            if passage in chosen:
+                continue
+            chosen.append(passage)
+            if len(chosen) >= limit:
+                break
     if not chosen:
         return list(passages[:limit])
     return sorted(chosen, key=lambda passage: passage.start)
