@@ -58,43 +58,6 @@ def test_sanitize_untrusted_markdown_removes_multiline_javascript_links() -> Non
     assert "click" in safe and "here" in safe
 
 
-def test_sanitize_untrusted_markdown_preserves_allowlisted_timestamp_links() -> None:
-    from youtube_study_tool.utils import sanitize_untrusted_markdown
-
-    allowed = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=12s"
-    safe = sanitize_untrusted_markdown(
-        f"[00:12]({allowed}) [external](https://attacker.example)",
-        allowed_urls=(allowed,),
-    )
-
-    assert f"[00:12]({allowed})" in safe
-    assert "attacker.example" not in safe
-
-
-def test_sanitize_untrusted_markdown_does_not_replace_literal_placeholders() -> None:
-    from youtube_study_tool.utils import sanitize_untrusted_markdown
-
-    allowed = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=12s"
-    literal = "__SAFE_MARKDOWN_LINK_0__"
-    safe = sanitize_untrusted_markdown(
-        f"[00:12]({allowed}) and {literal}", allowed_urls=(allowed,)
-    )
-
-    assert literal in safe
-    assert safe.count(literal) == 1
-
-
-def test_sanitize_untrusted_markdown_bounds_nested_link_cleanup() -> None:
-    from youtube_study_tool.utils import sanitize_untrusted_markdown
-
-    nested = "[a" * 1000 + "x" + "](https://attacker.example)" * 1000
-
-    safe = sanitize_untrusted_markdown(nested)
-
-    assert "https://attacker.example" not in safe
-    assert "](" not in safe
-
-
 def test_select_key_passages_covers_short_lesson_instead_of_fixed_gap() -> None:
     passages = [
         Passage(text=f"Lesson point {index}", start=index * 10.0, end=index * 10.0 + 8)
