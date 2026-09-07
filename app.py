@@ -32,7 +32,6 @@ from youtube_study_tool.utils import (
     format_seconds,
     sanitize_untrusted_markdown,
     timestamp_reference,
-    timestamp_url,
 )
 
 load_dotenv()
@@ -273,7 +272,6 @@ def render_classification_tab(analysis: AnalysisBundle) -> None:
 
 
 def compile_study_pack(bundle: TranscriptBundle, analysis: AnalysisBundle) -> str:
-    allowed_timestamp_urls = _allowed_timestamp_urls(bundle)
     title = sanitize_untrusted_markdown(bundle.video_title or bundle.video_id)
     classification_reason = sanitize_untrusted_markdown(analysis.classification.reason)
     return dedent(
@@ -287,21 +285,13 @@ def compile_study_pack(bundle: TranscriptBundle, analysis: AnalysisBundle) -> st
         Video type: {analysis.classification.video_type} ({analysis.classification.confidence:.2f})
         Classification reason: {classification_reason}
 
-        {sanitize_untrusted_markdown(analysis.summary, allowed_urls=allowed_timestamp_urls)}
+        {sanitize_untrusted_markdown(analysis.summary)}
 
-        {sanitize_untrusted_markdown(analysis.study_notes, allowed_urls=allowed_timestamp_urls)}
+        {sanitize_untrusted_markdown(analysis.study_notes)}
 
-        {sanitize_untrusted_markdown(analysis.quiz, allowed_urls=allowed_timestamp_urls)}
+        {sanitize_untrusted_markdown(analysis.quiz)}
         """
     ).strip()
-
-
-def _allowed_timestamp_urls(bundle: TranscriptBundle) -> tuple[str, ...]:
-    if not bundle.source_url:
-        return ()
-    return tuple(
-        timestamp_url(bundle.video_id, segment.start) for segment in bundle.segments
-    )
 
 
 def generate_study_pack(
@@ -507,24 +497,11 @@ def run() -> None:
         ["Summary", "Study Notes", "Quiz", "Classification", "Transcript"]
     )
     with summary_tab:
-        allowed_timestamp_urls = _allowed_timestamp_urls(transcript_bundle)
-        st.markdown(
-            sanitize_untrusted_markdown(
-                analysis_bundle.summary, allowed_urls=allowed_timestamp_urls
-            )
-        )
+        st.markdown(sanitize_untrusted_markdown(analysis_bundle.summary))
     with notes_tab:
-        st.markdown(
-            sanitize_untrusted_markdown(
-                analysis_bundle.study_notes, allowed_urls=allowed_timestamp_urls
-            )
-        )
+        st.markdown(sanitize_untrusted_markdown(analysis_bundle.study_notes))
     with quiz_tab:
-        st.markdown(
-            sanitize_untrusted_markdown(
-                analysis_bundle.quiz, allowed_urls=allowed_timestamp_urls
-            )
-        )
+        st.markdown(sanitize_untrusted_markdown(analysis_bundle.quiz))
     with classification_tab:
         render_classification_tab(analysis_bundle)
     with transcript_tab:
