@@ -375,6 +375,42 @@ def test_api_caption_invalid_timestamps_are_skipped(monkeypatch) -> None:
     assert bundle.duration_seconds == 5.0
 
 
+def test_fetch_video_title_passes_source_url_to_oembed(monkeypatch) -> None:
+    source_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    calls = []
+
+    class DummyResponse:
+        headers: ClassVar[dict[str, str]] = {}
+        content = b'{"title":"A useful lesson"}'
+        encoding = "utf-8"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return DummyResponse()
+
+    monkeypatch.setattr("youtube_study_tool.transcripts.requests.get", fake_get)
+
+    title = TranscriptService()._fetch_video_title(source_url)
+
+    assert title == "A useful lesson"
+    assert calls == [
+        (
+            "https://www.youtube.com/oembed",
+            {
+                "params": {"url": source_url, "format": "json"},
+                "timeout": 10,
+                "stream": True,
+            },
+        )
+    ]
+
+
 def test_caption_parser_skips_non_finite_timestamps() -> None:
     segments = TranscriptService()._segments_from_json3(
         {
