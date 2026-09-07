@@ -5,7 +5,7 @@ import logging
 import math
 import re
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from html import unescape
 from urllib.parse import parse_qs, urlparse
 
@@ -643,6 +643,7 @@ class TranscriptService:
                 "https://www.youtube.com/oembed",
                 timeout=10,
                 stream=True,
+                params={"url": source_url, "format": "json"},
             )
             payload = json.loads(self._read_caption_response(response))
         except (
@@ -674,12 +675,20 @@ class TranscriptService:
         return payload
 
     def _get_response_with_retries(
-        self, url: str, *, timeout: float, retries: int = 3, stream: bool = False
+        self,
+        url: str,
+        *,
+        timeout: float,
+        retries: int = 3,
+        stream: bool = False,
+        params: Mapping[str, str] | None = None,
     ) -> requests.Response:
         last_error: str | None = None
         for attempt in range(max(1, retries)):
             try:
-                response = requests.get(url, timeout=timeout, stream=stream)
+                response = requests.get(
+                    url, params=params, timeout=timeout, stream=stream
+                )
                 response.raise_for_status()
                 return response
             except requests.RequestException as error:
