@@ -152,11 +152,10 @@ STOPWORDS = {
 WORD_RE = re.compile(r"[^\W\d_][\w'-]{2,}", re.UNICODE)
 SENTENCE_END_RE = re.compile(r"[.!?]\s*$")
 MARKDOWN_IMAGE_RE = re.compile(r"!\[([^]]*)\]\([^)]*\)", re.DOTALL)
-MARKDOWN_LINK_RE = re.compile(r"\[([^]]*)\]\(([^)]*)\)", re.DOTALL)
+MARKDOWN_LINK_RE = re.compile(r"\[([^]]*)\]\([^)]*\)", re.DOTALL)
 MARKDOWN_REFERENCE_DEF_RE = re.compile(r"(?m)^\s{0,3}\[[^]\n]+\]:\s*\S.*$")
 MARKDOWN_REFERENCE_USE_RE = re.compile(r"\[([^]\n]+)\]\[[^]\n]*\]")
 BARE_URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
-MAX_MARKDOWN_SANITIZE_PASSES = 32
 
 
 @dataclass(frozen=True)
@@ -205,54 +204,18 @@ def encode_untrusted_json(value: object) -> str:
     )
 
 
-def sanitize_untrusted_markdown(value: str, *, allowed_urls: Iterable[str] = ()) -> str:
-    """Keep formatting while disabling untrusted links and raw HTML."""
-    allowed = frozenset(str(url) for url in allowed_urls)
-    preserved_links: dict[str, str] = {}
-    original = str(value)
-    placeholder_index = 0
-
-    def preserve_link(link: str) -> str:
-        nonlocal placeholder_index
-        while True:
-            placeholder = f"__SAFE_MARKDOWN_LINK_{id(original)}_{placeholder_index}__"
-            placeholder_index += 1
-            if placeholder not in original and placeholder not in preserved_links:
-                break
-        preserved_links[placeholder] = link
-        return placeholder
-
-    def replace_markdown_link(match: re.Match[str]) -> str:
-        label = sanitize_untrusted_markdown(match.group(1))
-        target = match.group(2).strip()
-        if target in allowed:
-            return preserve_link(f"[{label}]({target})")
-        return label
-
-    def replace_bare_url(match: re.Match[str]) -> str:
-        raw_url = match.group(0)
-        target = raw_url.rstrip(".,")
-        if target in allowed:
-            return preserve_link(target) + raw_url[len(target) :]
-        return "[external link removed]"
-
-    sanitized = original
-    for _pass in range(MAX_MARKDOWN_SANITIZE_PASSES):
+def sanitize_untrusted_markdown(value: str) -> str:
+    """Keep formatting while disabling links, images, and raw HTML from input."""
+    sanitized = str(value)
+    previous = None
+    while sanitized != previous:
         previous = sanitized
         sanitized = MARKDOWN_IMAGE_RE.sub(r"\1", sanitized)
-        sanitized = MARKDOWN_LINK_RE.sub(replace_markdown_link, sanitized)
+        sanitized = MARKDOWN_LINK_RE.sub(r"\1", sanitized)
         sanitized = MARKDOWN_REFERENCE_USE_RE.sub(r"\1", sanitized)
         sanitized = MARKDOWN_REFERENCE_DEF_RE.sub("[external link removed]", sanitized)
-        if sanitized == previous:
-            break
-    else:
-        # Flatten only pathological nesting after the bounded cleanup passes.
-        sanitized = sanitized.translate(str.maketrans("[]()", "    "))
-    sanitized = BARE_URL_RE.sub(replace_bare_url, sanitized)
-    sanitized = sanitized.replace("<", "&lt;").replace(">", "&gt;")
-    for placeholder, link in preserved_links.items():
-        sanitized = sanitized.replace(placeholder, link)
-    return sanitized
+    sanitized = BARE_URL_RE.sub("[external link removed]", sanitized)
+    return sanitized.replace("<", "&lt;").replace(">", "&gt;")
 
 
 def tokenize(text: str) -> list[str]:
