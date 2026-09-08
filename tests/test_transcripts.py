@@ -267,6 +267,65 @@ Next line
     ]
 
 
+def test_download_caption_segments_skips_reversed_webvtt_cues(monkeypatch) -> None:
+    class DummyResponse:
+        text = """WEBVTT
+
+00:02 --> 00:01
+Reversed cue
+
+00:01 --> 00:02
+Valid cue
+"""
+
+        def raise_for_status(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "youtube_study_tool.transcripts.requests.get",
+        lambda *args, **kwargs: DummyResponse(),
+    )
+
+    segments = TranscriptService()._download_caption_segments(
+        "https://example.com/captions.vtt", track_ext="vtt"
+    )
+
+    assert [segment.text for segment in segments] == ["Valid cue"]
+
+
+def test_caption_retries_close_http_error_responses(monkeypatch) -> None:
+    responses = []
+
+    class DummyResponse:
+        status_code = 503
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def raise_for_status(self) -> None:
+            raise requests.HTTPError(response=self)
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fail(*args, **kwargs):
+        response = DummyResponse()
+        responses.append(response)
+        return response
+
+    monkeypatch.setattr("youtube_study_tool.transcripts.requests.get", fail)
+    monkeypatch.setattr(
+        "youtube_study_tool.transcripts.time.sleep", lambda _delay: None
+    )
+
+    with pytest.raises(TranscriptRetrievalError, match="after 2 attempts"):
+        TranscriptService()._get_response_with_retries(
+            "https://example.com/captions.vtt", timeout=1, retries=2, stream=True
+        )
+
+    assert [response.closed for response in responses] == [True, True]
+
+
 def test_download_caption_segments_parses_srt(monkeypatch) -> None:
     class DummyResponse:
         text = """1

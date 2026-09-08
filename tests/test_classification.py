@@ -1,3 +1,5 @@
+import pytest
+
 from youtube_study_tool.classification import (
     heuristic_classification,
     parse_classification_json,
@@ -20,6 +22,24 @@ def test_parse_classification_json_accepts_required_shape() -> None:
 
     assert result.video_type == "tutorial"
     assert result.confidence == 0.88
+
+
+def test_parse_classification_json_rejects_non_finite_confidence() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        parse_classification_json(
+            '{"video_type":"lecture","confidence":"NaN",'
+            '"reason":"reason","best_summary_style":"summary",'
+            '"best_note_style":"notes"}'
+        )
+
+
+def test_parse_classification_json_rejects_non_string_explanation_fields() -> None:
+    with pytest.raises(ValueError, match="strings"):
+        parse_classification_json(
+            '{"video_type":"lecture","confidence":0.8,'
+            '"reason":null,"best_summary_style":"summary",'
+            '"best_note_style":"notes"}'
+        )
 
 
 def test_heuristic_classification_detects_coding_walkthrough() -> None:
