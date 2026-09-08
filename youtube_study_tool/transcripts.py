@@ -568,7 +568,7 @@ class TranscriptService:
 
         def flush() -> None:
             nonlocal start, end, cue_lines
-            if start is not None and end is not None:
+            if start is not None and end is not None and end >= start:
                 text = clean_whitespace(
                     re.sub(r"<[^>]+>", "", unescape(" ".join(cue_lines)))
                 )
@@ -685,6 +685,7 @@ class TranscriptService:
     ) -> requests.Response:
         last_error: str | None = None
         for attempt in range(max(1, retries)):
+            response: requests.Response | None = None
             try:
                 response = requests.get(
                     url, params=params, timeout=timeout, stream=stream
@@ -692,6 +693,8 @@ class TranscriptService:
                 response.raise_for_status()
                 return response
             except requests.RequestException as error:
+                if response is not None:
+                    response.close()
                 status = getattr(getattr(error, "response", None), "status_code", None)
                 last_error = type(error).__name__
                 if status is not None:

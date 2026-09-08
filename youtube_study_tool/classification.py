@@ -222,10 +222,20 @@ def normalize_classification(data: dict[str, object]) -> VideoClassification:
         confidence = float(data.get("confidence", 0.0))
     except (TypeError, ValueError) as error:
         raise ValueError("confidence must be numeric") from error
+    if not math.isfinite(confidence):
+        raise ValueError("confidence must be finite")
 
-    reason = str(data.get("reason", "")).strip()
-    best_summary_style = str(data.get("best_summary_style", "")).strip()
-    best_note_style = str(data.get("best_note_style", "")).strip()
+    reason_value = data.get("reason", "")
+    summary_style_value = data.get("best_summary_style", "")
+    note_style_value = data.get("best_note_style", "")
+    if not all(
+        isinstance(value, str)
+        for value in (reason_value, summary_style_value, note_style_value)
+    ):
+        raise ValueError("classification response fields must be strings")
+    reason = reason_value.strip()
+    best_summary_style = summary_style_value.strip()
+    best_note_style = note_style_value.strip()
     if not reason or not best_summary_style or not best_note_style:
         raise ValueError("classification response is missing required fields")
 
