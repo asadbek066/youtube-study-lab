@@ -326,6 +326,34 @@ def test_caption_retries_close_http_error_responses(monkeypatch) -> None:
     assert [response.closed for response in responses] == [True, True]
 
 
+def test_get_json_with_retries_closes_successful_response(monkeypatch) -> None:
+    class DummyResponse:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"status": "ok"}
+
+        def close(self) -> None:
+            self.closed = True
+
+    response = DummyResponse()
+    monkeypatch.setattr(
+        "youtube_study_tool.transcripts.requests.get",
+        lambda *args, **kwargs: response,
+    )
+
+    payload = TranscriptService()._get_json_with_retries(
+        "https://example.com/captions.json", timeout=1
+    )
+
+    assert payload == {"status": "ok"}
+    assert response.closed is True
+
+
 def test_download_caption_segments_parses_srt(monkeypatch) -> None:
     class DummyResponse:
         text = """1

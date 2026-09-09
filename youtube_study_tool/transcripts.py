@@ -668,6 +668,8 @@ class TranscriptService:
             raise TranscriptRetrievalError(
                 "Caption endpoint returned invalid JSON."
             ) from error
+        finally:
+            response.close()
         if not isinstance(payload, dict):
             raise TranscriptRetrievalError(
                 "Caption endpoint returned a non-object JSON payload."
