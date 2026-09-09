@@ -267,6 +267,93 @@ Next line
     ]
 
 
+def test_download_caption_segments_skips_reversed_webvtt_cues(monkeypatch) -> None:
+    class DummyResponse:
+        text = """WEBVTT
+
+00:02 --> 00:01
+Reversed cue
+
+00:01 --> 00:02
+Valid cue
+"""
+
+        def raise_for_status(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "youtube_study_tool.transcripts.requests.get",
+        lambda *args, **kwargs: DummyResponse(),
+    )
+
+    segments = TranscriptService()._download_caption_segments(
+        "https://example.com/captions.vtt", track_ext="vtt"
+    )
+
+    assert [segment.text for segment in segments] == ["Valid cue"]
+
+
+def test_caption_retries_close_http_error_responses(monkeypatch) -> None:
+    responses = []
+
+    class DummyResponse:
+        status_code = 503
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def raise_for_status(self) -> None:
+            raise requests.HTTPError(response=self)
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fail(*args, **kwargs):
+        response = DummyResponse()
+        responses.append(response)
+        return response
+
+    monkeypatch.setattr("youtube_study_tool.transcripts.requests.get", fail)
+    monkeypatch.setattr(
+        "youtube_study_tool.transcripts.time.sleep", lambda _delay: None
+    )
+
+    with pytest.raises(TranscriptRetrievalError, match="after 2 attempts"):
+        TranscriptService()._get_response_with_retries(
+            "https://example.com/captions.vtt", timeout=1, retries=2, stream=True
+        )
+
+    assert [response.closed for response in responses] == [True, True]
+
+
+def test_get_json_with_retries_closes_successful_response(monkeypatch) -> None:
+    class DummyResponse:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"status": "ok"}
+
+        def close(self) -> None:
+            self.closed = True
+
+    response = DummyResponse()
+    monkeypatch.setattr(
+        "youtube_study_tool.transcripts.requests.get",
+        lambda *args, **kwargs: response,
+    )
+
+    payload = TranscriptService()._get_json_with_retries(
+        "https://example.com/captions.json", timeout=1
+    )
+
+    assert payload == {"status": "ok"}
+    assert response.closed is True
+
+
 def test_download_caption_segments_parses_srt(monkeypatch) -> None:
     class DummyResponse:
         text = """1
@@ -373,6 +460,42 @@ def test_api_caption_invalid_timestamps_are_skipped(monkeypatch) -> None:
 
     assert [segment.text for segment in bundle.segments] == ["good"]
     assert bundle.duration_seconds == 5.0
+
+
+def test_fetch_video_title_passes_source_url_to_oembed(monkeypatch) -> None:
+    source_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    calls = []
+
+    class DummyResponse:
+        headers: ClassVar[dict[str, str]] = {}
+        content = b'{"title":"A useful lesson"}'
+        encoding = "utf-8"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return DummyResponse()
+
+    monkeypatch.setattr("youtube_study_tool.transcripts.requests.get", fake_get)
+
+    title = TranscriptService()._fetch_video_title(source_url)
+
+    assert title == "A useful lesson"
+    assert calls == [
+        (
+            "https://www.youtube.com/oembed",
+            {
+                "params": {"url": source_url, "format": "json"},
+                "timeout": 10,
+                "stream": True,
+            },
+        )
+    ]
 
 
 def test_caption_parser_skips_non_finite_timestamps() -> None:

@@ -5,7 +5,7 @@ import logging
 import math
 import re
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from html import unescape
 from urllib.parse import parse_qs, urlparse
 
@@ -568,7 +568,7 @@ class TranscriptService:
 
         def flush() -> None:
             nonlocal start, end, cue_lines
-            if start is not None and end is not None:
+            if start is not None and end is not None and end >= start:
                 text = clean_whitespace(
                     re.sub(r"<[^>]+>", "", unescape(" ".join(cue_lines)))
                 )
@@ -643,6 +643,7 @@ class TranscriptService:
                 "https://www.youtube.com/oembed",
                 timeout=10,
                 stream=True,
+                params={"url": source_url, "format": "json"},
             )
             payload = json.loads(self._read_caption_response(response))
         except (
@@ -667,6 +668,8 @@ class TranscriptService:
             raise TranscriptRetrievalError(
                 "Caption endpoint returned invalid JSON."
             ) from error
+        finally:
+            response.close()
         if not isinstance(payload, dict):
             raise TranscriptRetrievalError(
                 "Caption endpoint returned a non-object JSON payload."
@@ -674,15 +677,26 @@ class TranscriptService:
         return payload
 
     def _get_response_with_retries(
-        self, url: str, *, timeout: float, retries: int = 3, stream: bool = False
+        self,
+        url: str,
+        *,
+        timeout: float,
+        retries: int = 3,
+        stream: bool = False,
+        params: Mapping[str, str] | None = None,
     ) -> requests.Response:
         last_error: str | None = None
         for attempt in range(max(1, retries)):
+            response: requests.Response | None = None
             try:
-                response = requests.get(url, timeout=timeout, stream=stream)
+                response = requests.get(
+                    url, params=params, timeout=timeout, stream=stream
+                )
                 response.raise_for_status()
                 return response
             except requests.RequestException as error:
+                if response is not None:
+                    response.close()
                 status = getattr(getattr(error, "response", None), "status_code", None)
                 last_error = type(error).__name__
                 if status is not None:
