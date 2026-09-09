@@ -84,3 +84,20 @@ def test_markdown_export_neutralizes_untrusted_metadata() -> None:
 
     assert "javascript:" not in exported
     assert "alert(1)" not in exported
+
+
+def test_markdown_export_preserves_source_timestamp_links() -> None:
+    from dataclasses import replace
+
+    from app import compile_study_pack
+    from youtube_study_tool.demo import build_demo_transcript
+    from youtube_study_tool.fallback import generate_fallback_bundle
+
+    bundle = replace(
+        build_demo_transcript(),
+        video_id="dQw4w9WgXcQ",
+        source_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    )
+    exported = compile_study_pack(bundle, generate_fallback_bundle(bundle))
+
+    assert "[00:00](https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=0s)" in exported
