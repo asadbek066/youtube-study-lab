@@ -205,6 +205,27 @@ def encode_untrusted_json(value: object) -> str:
     )
 
 
+def _sanitize_markdown_body(value: str) -> str:
+    """Strip links and HTML from a body after trusted links are protected."""
+    sanitized = value
+    for _pass in range(MAX_MARKDOWN_SANITIZE_PASSES):
+        previous = sanitized
+        sanitized = MARKDOWN_IMAGE_RE.sub(r"\1", sanitized)
+        sanitized = MARKDOWN_LINK_RE.sub(r"\1", sanitized)
+        sanitized = MARKDOWN_REFERENCE_USE_RE.sub(r"\1", sanitized)
+        sanitized = MARKDOWN_REFERENCE_DEF_RE.sub("[external link removed]", sanitized)
+        if sanitized == previous:
+            break
+    else:
+        # Flatten only pathological nesting after the bounded cleanup passes.
+        sanitized = sanitized.translate(str.maketrans("[]()", "    "))
+    sanitized = BARE_URL_RE.sub("[external link removed]", sanitized)
+    return sanitized.replace("<", "&lt;").replace(">", "&gt;")
+
+
+_ALLOWLISTED_INLINE_LINK_RE = re.compile(r"(?<!\!)\[([^\[\]]*)\]\(([^)]*)\)", re.DOTALL)
+
+
 def sanitize_untrusted_markdown(value: str, *, allowed_urls: Iterable[str] = ()) -> str:
     """Keep formatting while disabling untrusted links and raw HTML."""
     allowed = frozenset(str(url) for url in allowed_urls)
@@ -222,34 +243,24 @@ def sanitize_untrusted_markdown(value: str, *, allowed_urls: Iterable[str] = ())
         preserved_links[placeholder] = link
         return placeholder
 
-    def replace_markdown_link(match: re.Match[str]) -> str:
-        label = sanitize_untrusted_markdown(match.group(1))
+    def preserve_allowed_inline_link(match: re.Match[str]) -> str:
         target = match.group(2).strip()
-        if target in allowed:
-            return preserve_link(f"[{label}]({target})")
-        return label
+        if target not in allowed:
+            return match.group(0)
+        label = _sanitize_markdown_body(match.group(1))
+        return preserve_link(f"[{label}]({target})")
 
-    def replace_bare_url(match: re.Match[str]) -> str:
+    def preserve_allowed_bare_url(match: re.Match[str]) -> str:
         raw_url = match.group(0)
         target = raw_url.rstrip(".,")
         if target in allowed:
             return preserve_link(target) + raw_url[len(target) :]
         return "[external link removed]"
 
-    sanitized = original
-    for _pass in range(MAX_MARKDOWN_SANITIZE_PASSES):
-        previous = sanitized
-        sanitized = MARKDOWN_IMAGE_RE.sub(r"\1", sanitized)
-        sanitized = MARKDOWN_LINK_RE.sub(replace_markdown_link, sanitized)
-        sanitized = MARKDOWN_REFERENCE_USE_RE.sub(r"\1", sanitized)
-        sanitized = MARKDOWN_REFERENCE_DEF_RE.sub("[external link removed]", sanitized)
-        if sanitized == previous:
-            break
-    else:
-        # Flatten only pathological nesting after the bounded cleanup passes.
-        sanitized = sanitized.translate(str.maketrans("[]()", "    "))
-    sanitized = BARE_URL_RE.sub(replace_bare_url, sanitized)
-    sanitized = sanitized.replace("<", "&lt;").replace(">", "&gt;")
+    sanitized = _ALLOWLISTED_INLINE_LINK_RE.sub(preserve_allowed_inline_link, original)
+    # Protect the remaining allowlisted URLs before flattening untrusted link syntax.
+    sanitized = BARE_URL_RE.sub(preserve_allowed_bare_url, sanitized)
+    sanitized = _sanitize_markdown_body(sanitized)
     for placeholder, link in preserved_links.items():
         sanitized = sanitized.replace(placeholder, link)
     return sanitized

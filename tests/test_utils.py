@@ -84,6 +84,22 @@ def test_sanitize_untrusted_markdown_does_not_replace_literal_placeholders() -> 
     assert safe.count(literal) == 1
 
 
+def test_sanitize_untrusted_markdown_strips_nested_untrusted_link_around_allowed_link() -> (
+    None
+):
+    from youtube_study_tool.utils import sanitize_untrusted_markdown
+
+    allowed = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=12s"
+    safe = sanitize_untrusted_markdown(
+        f"[outer [00:12]({allowed})](javascript:alert(1))",
+        allowed_urls=(allowed,),
+    )
+
+    assert f"[00:12]({allowed})" in safe
+    assert "javascript:" not in safe
+    assert "alert(1)" not in safe
+
+
 def test_sanitize_untrusted_markdown_bounds_nested_link_cleanup() -> None:
     from youtube_study_tool.utils import sanitize_untrusted_markdown
 
