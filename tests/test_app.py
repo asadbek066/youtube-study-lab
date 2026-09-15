@@ -101,3 +101,60 @@ def test_markdown_export_preserves_source_timestamp_links() -> None:
     exported = compile_study_pack(bundle, generate_fallback_bundle(bundle))
 
     assert "[00:00](https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=0s)" in exported
+
+
+def _paid_generation_recorder(monkeypatch):
+    from youtube_study_tool.fallback import generate_fallback_bundle
+
+    calls = []
+
+    monkeypatch.setattr("app.StudyPackGenerator.is_ready", property(lambda self: True))
+
+    def record_generate(self, bundle):
+        calls.append(bundle.video_id)
+        return generate_fallback_bundle(bundle)
+
+    monkeypatch.setattr("app.StudyPackGenerator.generate", record_generate)
+    return calls
+
+
+def _submit_manual_transcript(app) -> None:
+    transcript_text = (
+        "A neural network starts with adjustable weights. It makes a prediction from an input example. "
+        "The prediction is compared with the correct target to calculate a loss. Backpropagation measures "
+        "how each weight contributed to that error. Gradient descent updates the weights a little at a time. "
+        "Repeating this process across many examples helps the network learn useful patterns and generalize."
+    )
+    app.text_input(key="manual-title").input("Pasted lecture")
+    app.text_area(key="manual-transcript").input(transcript_text)
+    app.button(key="manual-submit").click().run()
+
+
+def test_paid_submission_cap_routes_overflow_to_local_generation(monkeypatch) -> None:
+    import app as app_module
+
+    calls = _paid_generation_recorder(monkeypatch)
+
+    app = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
+    app.session_state["paid_generation_submissions"] = (
+        app_module.MAX_PAID_SUBMISSIONS_PER_SESSION
+    )
+    _submit_manual_transcript(app)
+
+    assert calls == []
+    assert "provider-session limit" in "".join(info.value for info in app.info)
+    assert "analysis_bundle" in app.session_state
+    assert not app.exception
+
+
+def test_paid_submission_counter_increments_only_for_provider_calls(
+    monkeypatch,
+) -> None:
+    calls = _paid_generation_recorder(monkeypatch)
+
+    app = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
+    _submit_manual_transcript(app)
+
+    assert len(calls) == 1
+    assert app.session_state["paid_generation_submissions"] == 1
+    assert not app.exception
