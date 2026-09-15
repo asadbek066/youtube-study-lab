@@ -561,3 +561,115 @@ def test_download_caption_segments_parses_ttml_xml(monkeypatch) -> None:
     assert [segment.text for segment in segments] == ["First", "Second"]
     assert segments[0].duration == 1.25
     assert segments[1].duration == 0.75
+
+
+def test_fetch_falls_back_to_ytdlp_when_the_api_backend_fails(monkeypatch) -> None:
+    from youtube_study_tool.models import TranscriptSegment
+    from youtube_study_tool.transcripts import TranscriptBundle
+
+    service = TranscriptService()
+    fallback_bundle = TranscriptBundle(
+        video_id="dQw4w9WgXcQ",
+        source_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        transcript_text="fallback text",
+        segments=(TranscriptSegment("fallback text", 0.0, 1.0),),
+        language_code="en",
+        language_name="English",
+        is_generated=True,
+        duration_seconds=1.0,
+        word_count=2,
+    )
+
+    def failing_primary(*_args):
+        raise RuntimeError("api backend exploded")
+
+    monkeypatch.setattr(service, "_fetch_with_youtube_transcript_api", failing_primary)
+    monkeypatch.setattr(service, "_fetch_with_ytdlp", lambda *_args: fallback_bundle)
+
+    bundle = service.fetch("https://www.youtube.com/watch?v=dQw4w9WgXcQ", ("en",))
+
+    assert bundle.transcript_text == "fallback text"
+    assert bundle.video_id == "dQw4w9WgXcQ"
+
+
+def test_fetch_reports_both_backend_failures_and_type_names_only(monkeypatch) -> None:
+    service = TranscriptService()
+    source = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    def failing_primary(*_args):
+        raise RuntimeError("primary leaked detail")
+
+    def failing_fallback(*_args):
+        raise ValueError("fallback leaked detail")
+
+    monkeypatch.setattr(service, "_fetch_with_youtube_transcript_api", failing_primary)
+    monkeypatch.setattr(service, "_fetch_with_ytdlp", failing_fallback)
+
+    with pytest.raises(TranscriptRetrievalError) as raised:
+        service.fetch(source, ("en",))
+
+    message = str(raised.value)
+    assert "RuntimeError" in message
+    assert "ValueError" in message
+    assert "primary leaked detail" not in message
+    assert "fallback leaked detail" not in message
+
+
+def test_caption_client_errors_are_not_retried(monkeypatch) -> None:
+    class DummyResponse:
+        status_code = 404
+        closed = False
+
+        def raise_for_status(self) -> None:
+            raise requests.HTTPError(response=self)
+
+        def close(self) -> None:
+            self.closed = True
+
+    calls = []
+    sleeps = []
+
+    def fail(*args, **kwargs):
+        calls.append(args)
+        return DummyResponse()
+
+    monkeypatch.setattr("youtube_study_tool.transcripts.requests.get", fail)
+    monkeypatch.setattr("youtube_study_tool.transcripts.time.sleep", sleeps.append)
+
+    with pytest.raises(TranscriptRetrievalError, match="HTTP 404"):
+        TranscriptService()._get_response_with_retries(
+            "https://example.com/captions.vtt", timeout=1
+        )
+
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_caption_rate_limit_responses_are_still_retried(monkeypatch) -> None:
+    class DummyResponse:
+        status_code = 429
+        closed = False
+
+        def raise_for_status(self) -> None:
+            raise requests.HTTPError(response=self)
+
+        def close(self) -> None:
+            self.closed = True
+
+    calls = []
+    sleeps = []
+
+    def fail(*args, **kwargs):
+        calls.append(args)
+        return DummyResponse()
+
+    monkeypatch.setattr("youtube_study_tool.transcripts.requests.get", fail)
+    monkeypatch.setattr("youtube_study_tool.transcripts.time.sleep", sleeps.append)
+
+    with pytest.raises(TranscriptRetrievalError, match="HTTP 429"):
+        TranscriptService()._get_response_with_retries(
+            "https://example.com/captions.vtt", timeout=1
+        )
+
+    assert len(calls) == 3
+    assert sleeps == [0.3, 0.6]
