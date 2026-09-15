@@ -701,6 +701,10 @@ class TranscriptService:
                 last_error = type(error).__name__
                 if status is not None:
                     last_error += f" HTTP {status}"
+                if status is not None and 400 <= status < 500 and status != 429:
+                    # Client errors cannot be fixed by retrying (404 dead video,
+                    # 403 bot block); only rate limiting is worth another try.
+                    break
                 if attempt < max(1, retries) - 1:
                     time.sleep(0.3 * (attempt + 1))
         raise TranscriptRetrievalError(
