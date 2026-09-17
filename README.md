@@ -55,9 +55,13 @@ source .venv/bin/activate
 
 ```bash
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements.lock
 streamlit run app.py
 ```
+
+`requirements.lock` is a hash-pinned runtime lock; pip verifies every artifact
+before installing. Streamlit Community Cloud installs `requirements.txt`
+directly, so hosted deployments resolve fresh transitive versions.
 
 Open the local URL and use the same instant-demo flow.
 
@@ -126,22 +130,29 @@ Useful settings from `.env.example` include:
 - Provider model/deployment and API credentials
 - `SUMMARY_STYLE` and `SUMMARY_DETAIL`
 - Output-token limits for the configured provider
+- `LLM_MAX_PROVIDER_CALLS_PER_HOUR`: process-wide provider-call budget shared
+  by all sessions (default 120; read at startup)
 
-The app validates numeric bounds and automatically falls back to local generation when a configured provider is unavailable.
+The app validates numeric bounds and provider URLs, and automatically falls
+back to local generation when a configured provider is unavailable. When that
+happens the pack is labeled as locally generated and the interface says why.
 
 ## Development
 
 Install the dependencies, then run:
 
 ```bash
-python -m pip install -r requirements-dev.txt
+python -m pip install --require-hashes -r requirements-dev.lock
 python -m ruff check app.py youtube_study_tool tests
 python -m ruff format --check app.py youtube_study_tool tests
 python -m pytest tests -q
 python -m compileall -q app.py youtube_study_tool tests
 ```
 
-The GitHub Actions workflow runs lint, formatting, and the test suite on Python 3.11 and 3.12 for pushes and pull requests.
+The GitHub Actions workflow runs lint, formatting, byte-compilation, dependency
+consistency, and the test suite on Python 3.11 through 3.14 for pushes and pull
+requests. `requirements-dev.lock` is generated with `uv pip compile
+requirements-dev.txt --universal --python-version 3.11 --generate-hashes`.
 
 ## Current limitations
 
@@ -150,12 +161,23 @@ The GitHub Actions workflow runs lint, formatting, and the test suite on Python 
 - Local heuristic generation prioritizes reliability and zero setup over model-level prose quality.
 - Inputs that would require more than 8 provider chunks use the bounded local
   fallback instead of multiplying paid generation calls.
-- API-provider generation is capped at 10 calls per pack and three paid
-  submissions per Streamlit session. This is a safety ceiling, not an
-  account-wide rate limiter or spend guarantee.
+- API-provider generation is capped at 10 calls per pack, three
+  provider-attempting submissions per Streamlit session, and a process-wide
+  `LLM_MAX_PROVIDER_CALLS_PER_HOUR` budget (default 120) shared by all
+  sessions. Submissions that never reach the provider do not consume the
+  session budget; with multiple worker processes, each process gets its own
+  budget. This bounds spend but is not an account-wide rate limiter or spend
+  guarantee.
+- Provider generation also stops after a 300-second time budget and each
+  provider request after 120 seconds; when a bound is hit the pack falls back
+  to local generation with a visible notice.
+- Transcript retrieval stops after a 90-second wall-clock budget; exceeding it
+  shows a clear error and produces no pack (paste the transcript instead).
 - Provider output passes format, source-vocabulary, and citation-link checks;
   those checks reduce obvious fabrication but are not an independent factual
   verification system.
+- Exported Markdown sanitizes video titles, caption language metadata, and
+  classification reasons before writing the file.
 
 ## Contributing
 
