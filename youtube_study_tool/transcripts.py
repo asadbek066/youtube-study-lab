@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import math
+import random
 import re
 import time
 from collections.abc import Iterable, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from html import unescape
 from urllib.parse import parse_qs, urlparse
 
@@ -31,26 +33,45 @@ VIDEO_ID_LENGTH = 11
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 LANGUAGE_CODE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 MAX_CAPTION_PAYLOAD_BYTES = 2_000_000
+MAX_WATCH_PAYLOAD_BYTES = 8_000_000
+TRANSCRIPT_FETCH_DEADLINE_SECONDS = 90.0
+MAX_RETRY_DELAY_SECONDS = 5.0
 logger = logging.getLogger(__name__)
+
+# A long-lived executor lets the caller abandon a slow fetch after the
+# wall-clock budget without joining it at the call site (a `with
+# ThreadPoolExecutor` would block on shutdown).
+_FETCH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="transcript-fetch"
+)
 
 
 class TranscriptRetrievalError(Exception):
     """Raised when all available transcript backends fail."""
 
 
+class TranscriptTimeoutError(TranscriptRetrievalError):
+    """Raised when transcript retrieval exceeds its wall-clock budget."""
+
+
+def _payload_limit(url: str) -> int:
+    # Watch pages and player metadata are HTML/JSON that legitimately exceed the
+    # caption ceiling; caption payloads keep the smaller bound.
+    if "/watch" in url or "youtubei/v1/player" in url:
+        return MAX_WATCH_PAYLOAD_BYTES
+    return MAX_CAPTION_PAYLOAD_BYTES
+
+
 class _BoundedYouTubeSession(requests.Session):
     """Materialize YouTube API responses only after enforcing a byte ceiling."""
 
     @staticmethod
-    def _materialize(response: requests.Response) -> requests.Response:
+    def _materialize(response: requests.Response, limit: int) -> requests.Response:
         try:
             content_length = response.headers.get(
                 "Content-Length"
             ) or response.headers.get("content-length")
-            if (
-                content_length is not None
-                and int(content_length) > MAX_CAPTION_PAYLOAD_BYTES
-            ):
+            if content_length is not None and int(content_length) > limit:
                 raise TranscriptRetrievalError(
                     "Caption track is too large to process safely."
                 )
@@ -60,13 +81,22 @@ class _BoundedYouTubeSession(requests.Session):
                 if not chunk:
                     continue
                 total += len(chunk)
-                if total > MAX_CAPTION_PAYLOAD_BYTES:
+                if total > limit:
                     raise TranscriptRetrievalError(
                         "Caption track is too large to process safely."
                     )
                 chunks.append(chunk)
             response._content = b"".join(chunks)
             response._content_consumed = True
+            content_type = str(
+                response.headers.get("Content-Type")
+                or response.headers.get("content-type")
+                or ""
+            )
+            if "charset=" not in content_type.lower():
+                # requests defaults text/* without a charset to ISO-8859-1,
+                # which silently mojibakes UTF-8 caption tracks.
+                response.encoding = "utf-8-sig"
             return response
         except Exception:
             response.close()
@@ -78,12 +108,12 @@ class _BoundedYouTubeSession(requests.Session):
     def get(self, url: str, **kwargs: object) -> requests.Response:
         kwargs["stream"] = True
         kwargs.setdefault("timeout", 20)
-        return self._materialize(super().get(url, **kwargs))
+        return self._materialize(super().get(url, **kwargs), _payload_limit(url))
 
     def post(self, url: str, **kwargs: object) -> requests.Response:
         kwargs["stream"] = True
         kwargs.setdefault("timeout", 20)
-        return self._materialize(super().post(url, **kwargs))
+        return self._materialize(super().post(url, **kwargs), _payload_limit(url))
 
 
 def extract_video_id(raw_value: str) -> str:
@@ -173,6 +203,11 @@ class TranscriptService:
             )
         except Exception as error:  # noqa: BLE001 - either backend may fail with library-specific errors.
             primary_error = error
+            logger.info(
+                "Primary transcript backend failed for %s: %s",
+                video_id,
+                type(error).__name__,
+            )
 
         try:
             return self._fetch_with_ytdlp(video_id, source_url, languages)
@@ -486,7 +521,16 @@ class TranscriptService:
                         "Caption track is too large to process safely."
                     )
                 raw = content
-            encoding = getattr(response, "encoding", None) or "utf-8-sig"
+            content_type = str(
+                headers.get("Content-Type") or headers.get("content-type") or ""
+            )
+            if "charset=" in content_type.lower():
+                encoding = getattr(response, "encoding", None) or "utf-8-sig"
+            else:
+                # requests defaults text/* without a charset to ISO-8859-1,
+                # which silently mojibakes non-ASCII captions; YouTube serves
+                # UTF-8, so prefer it unless the server said otherwise.
+                encoding = "utf-8-sig"
             try:
                 return raw.decode(encoding)
             except (LookupError, UnicodeDecodeError) as error:
@@ -706,10 +750,45 @@ class TranscriptService:
                     # 403 bot block); only rate limiting is worth another try.
                     break
                 if attempt < max(1, retries) - 1:
-                    time.sleep(0.3 * (attempt + 1))
+                    delay = 0.5 * (2**attempt)
+                    error_response = getattr(error, "response", None)
+                    retry_after = (getattr(error_response, "headers", {}) or {}).get(
+                        "Retry-After"
+                    )
+                    try:
+                        if retry_after is not None:
+                            delay = max(delay, float(retry_after))
+                    except (TypeError, ValueError):
+                        pass
+                    delay = min(delay, MAX_RETRY_DELAY_SECONDS)
+                    delay += random.uniform(0, 0.25)
+                    time.sleep(delay)
         raise TranscriptRetrievalError(
             f"Failed to download caption track after {retries} attempts: {last_error}"
         )
+
+
+def fetch_with_deadline(
+    service: TranscriptService,
+    source: str,
+    preferred_languages: Iterable[str],
+    *,
+    timeout: float = TRANSCRIPT_FETCH_DEADLINE_SECONDS,
+) -> TranscriptBundle:
+    """Run transcript retrieval under a wall-clock bound.
+
+    The worker thread cannot be cancelled, but per-request timeouts bound how
+    long it can outlive the abandoned call.
+    """
+    future: Future = _FETCH_EXECUTOR.submit(service.fetch, source, preferred_languages)
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError as error:
+        future.cancel()
+        raise TranscriptTimeoutError(
+            "Transcript retrieval timed out. YouTube may be slow or blocking "
+            "this server; paste the transcript instead."
+        ) from error
 
 
 def _parse_caption_time(value: object) -> float:

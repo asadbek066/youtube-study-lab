@@ -6,9 +6,15 @@ import requests
 
 from youtube_study_tool.models import MAX_TRANSCRIPT_CHARS, TranscriptSegment
 from youtube_study_tool.transcripts import (
+    MAX_CAPTION_PAYLOAD_BYTES,
+    MAX_WATCH_PAYLOAD_BYTES,
     TranscriptRetrievalError,
     TranscriptService,
+    TranscriptTimeoutError,
+    _BoundedYouTubeSession,
+    _payload_limit,
     extract_video_id,
+    fetch_with_deadline,
     normalize_languages,
 )
 
@@ -648,6 +654,7 @@ def test_caption_client_errors_are_not_retried(monkeypatch) -> None:
 def test_caption_rate_limit_responses_are_still_retried(monkeypatch) -> None:
     class DummyResponse:
         status_code = 429
+        headers: ClassVar[dict[str, str]] = {"Retry-After": "3"}
         closed = False
 
         def raise_for_status(self) -> None:
@@ -672,4 +679,300 @@ def test_caption_rate_limit_responses_are_still_retried(monkeypatch) -> None:
         )
 
     assert len(calls) == 3
-    assert sleeps == [0.3, 0.6]
+    # Retry-After (3s) wins over the jittered exponential backoff, and every
+    # delay stays within the documented ceiling plus jitter.
+    assert all(3.0 <= delay <= 3.25 for delay in sleeps)
+
+
+def test_caption_retry_backoff_is_jittered_and_bounded(monkeypatch) -> None:
+    class DummyResponse:
+        status_code = 503
+        headers: ClassVar[dict[str, str]] = {}
+        closed = False
+
+        def raise_for_status(self) -> None:
+            raise requests.HTTPError(response=self)
+
+        def close(self) -> None:
+            self.closed = True
+
+    sleeps = []
+
+    monkeypatch.setattr(
+        "youtube_study_tool.transcripts.requests.get",
+        lambda *args, **kwargs: DummyResponse(),
+    )
+    monkeypatch.setattr("youtube_study_tool.transcripts.time.sleep", sleeps.append)
+
+    with pytest.raises(TranscriptRetrievalError, match="HTTP 503"):
+        TranscriptService()._get_response_with_retries(
+            "https://example.com/captions.vtt", timeout=1
+        )
+
+    assert 0.5 <= sleeps[0] <= 0.75
+    assert 1.0 <= sleeps[1] <= 1.25
+
+
+class _FakeTranscript:
+    def __init__(self, code: str, translatable: bool = False) -> None:
+        self.language_code = code
+        self.language = code
+        self.is_translatable = translatable
+
+    def translate(self, code: str) -> "_FakeTranscript":
+        return _FakeTranscript(code)
+
+
+class _FakeTranscriptList:
+    def __init__(self, transcripts, findable=None) -> None:
+        self._transcripts = list(transcripts)
+        self._findable = findable or {}
+
+    def find_transcript(self, languages):
+        for language in languages:
+            if language in self._findable:
+                return self._findable[language]
+        from youtube_transcript_api import NoTranscriptFound
+
+        raise NoTranscriptFound(
+            video_id="video",
+            requested_language_codes=list(languages),
+            transcript_data=[],
+        )
+
+    def __iter__(self):
+        return iter(self._transcripts)
+
+
+def test_select_transcript_prefers_a_translatable_track_when_english_is_missing() -> (
+    None
+):
+    german = _FakeTranscript("de", translatable=True)
+    service = TranscriptService()
+
+    selected = service._select_transcript(_FakeTranscriptList([german]), ("en",))
+
+    assert selected.language_code == "en"
+    assert selected is not german
+
+
+def test_select_transcript_falls_back_to_the_first_available_track() -> None:
+    japanese = _FakeTranscript("ja", translatable=False)
+    service = TranscriptService()
+
+    selected = service._select_transcript(_FakeTranscriptList([japanese]), ("en",))
+
+    assert selected is japanese
+
+
+def test_select_transcript_uses_exact_language_when_available() -> None:
+    german = _FakeTranscript("de")
+    english = _FakeTranscript("en")
+    service = TranscriptService()
+    transcript_list = _FakeTranscriptList([english, german], {"de": german})
+
+    selected = service._select_transcript(transcript_list, ("de", "en"))
+
+    assert selected is german
+
+
+def test_caption_track_selection_prefers_manual_tracks_in_language_order() -> None:
+    service = TranscriptService()
+    manual = {"url": "https://example.test/de.vtt", "ext": "vtt", "name": "Deutsch"}
+    automatic = {"url": "https://example.test/en.vtt", "ext": "vtt", "name": "English"}
+    subtitles = {"de": [manual]}
+    automatic_captions = {"en": [automatic]}
+
+    track, generated, code, name = service._select_caption_track(
+        subtitles, automatic_captions, ("de", "en")
+    )
+
+    assert track is manual
+    assert generated is False
+    assert code == "de"
+    assert name == "Deutsch"
+
+
+def test_caption_track_selection_falls_back_to_automatic_captions() -> None:
+    service = TranscriptService()
+    automatic = {"url": "https://example.test/en.vtt", "ext": "vtt"}
+
+    track, generated, code, _name = service._select_caption_track(
+        {}, {"en": [automatic]}, ("en",)
+    )
+
+    assert track is automatic
+    assert generated is True
+    assert code == "en"
+
+
+def test_caption_track_selection_prefers_json3_over_vtt() -> None:
+    service = TranscriptService()
+    vtt = {"url": "https://example.test/en.vtt", "ext": "vtt"}
+    json3 = {"url": "https://example.test/en.json3", "ext": "json3"}
+
+    track, _generated, _code, _name = service._select_caption_track(
+        {"en": [vtt, json3]}, {}, ("en",)
+    )
+
+    assert track is json3
+
+
+def test_payload_limit_separates_watch_pages_from_captions() -> None:
+    assert (
+        _payload_limit("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        == MAX_WATCH_PAYLOAD_BYTES
+    )
+    assert (
+        _payload_limit("https://www.youtube.com/youtubei/v1/player")
+        == MAX_WATCH_PAYLOAD_BYTES
+    )
+    assert (
+        _payload_limit("https://example.test/captions.vtt") == MAX_CAPTION_PAYLOAD_BYTES
+    )
+
+
+class _CaptionResponse:
+    def __init__(self, chunks, headers=None, encoding=None) -> None:
+        self._chunks = list(chunks)
+        self.headers = headers or {}
+        self.encoding = encoding
+        self.closed = False
+        self.iterated = False
+        self._content = None
+        self._content_consumed = False
+
+    def iter_content(self, chunk_size=0):
+        self.iterated = True
+        yield from self._chunks
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_caption_response_decodes_utf8_without_a_charset_header() -> None:
+    # requests reports ISO-8859-1 for text/* without a charset; the reader must
+    # prefer UTF-8 anyway.
+    response = _CaptionResponse(["café".encode()], encoding="ISO-8859-1")
+
+    text = TranscriptService()._read_caption_response(response)
+
+    assert text == "café"
+    assert response.closed
+
+
+def test_bounded_session_overrides_the_implicit_latin1_default() -> None:
+    payload = "über café".encode()
+
+    class _Response:
+        headers: ClassVar[dict[str, str]] = {"Content-Type": "text/xml"}
+        encoding = "ISO-8859-1"
+
+        def iter_content(self, chunk_size=0):
+            yield payload
+
+        def close(self) -> None:
+            pass
+
+    materialized = _BoundedYouTubeSession._materialize(
+        _Response(), MAX_CAPTION_PAYLOAD_BYTES
+    )
+
+    assert materialized.encoding == "utf-8-sig"
+    assert materialized._content.decode(materialized.encoding) == "über café"
+
+
+def test_caption_response_honors_an_explicit_charset() -> None:
+    response = _CaptionResponse(
+        ["café".encode("latin-1")],
+        headers={"Content-Type": "text/vtt; charset=iso-8859-1"},
+        encoding="iso-8859-1",
+    )
+
+    text = TranscriptService()._read_caption_response(response)
+
+    assert text == "café"
+
+
+def test_caption_response_rejects_invalid_utf8() -> None:
+    response = _CaptionResponse([b"\xff\xfe\x00bad"])
+
+    with pytest.raises(TranscriptRetrievalError, match="invalid text encoding"):
+        TranscriptService()._read_caption_response(response)
+
+
+def test_caption_response_rejects_oversized_content_length_before_reading() -> None:
+    response = _CaptionResponse(
+        [b"small"],
+        headers={"Content-Length": str(MAX_CAPTION_PAYLOAD_BYTES + 1)},
+    )
+
+    with pytest.raises(TranscriptRetrievalError, match="too large"):
+        TranscriptService()._read_caption_response(response)
+
+    assert response.iterated is False
+    assert response.closed
+
+
+def test_bounded_session_allows_larger_watch_payloads() -> None:
+    payload = b"x" * (MAX_CAPTION_PAYLOAD_BYTES + 1000)
+    response = _CaptionResponse([payload])
+
+    materialized = _BoundedYouTubeSession._materialize(
+        response, MAX_WATCH_PAYLOAD_BYTES
+    )
+
+    assert len(materialized._content) == len(payload)
+
+
+def test_bounded_session_preserves_an_explicit_charset() -> None:
+    payload = "über café".encode("latin-1")
+
+    class _Response:
+        headers: ClassVar[dict[str, str]] = {
+            "Content-Type": "text/vtt; charset=iso-8859-1"
+        }
+        encoding = "iso-8859-1"
+
+        def iter_content(self, chunk_size=0):
+            yield payload
+
+        def close(self) -> None:
+            pass
+
+    materialized = _BoundedYouTubeSession._materialize(
+        _Response(), MAX_CAPTION_PAYLOAD_BYTES
+    )
+
+    assert materialized.encoding == "iso-8859-1"
+    assert materialized._content.decode(materialized.encoding) == "über café"
+
+
+def test_bounded_session_rejects_caption_payloads_over_the_caption_cap() -> None:
+    payload = b"x" * (MAX_CAPTION_PAYLOAD_BYTES + 1)
+    response = _CaptionResponse([payload])
+
+    with pytest.raises(TranscriptRetrievalError, match="too large"):
+        _BoundedYouTubeSession._materialize(response, MAX_CAPTION_PAYLOAD_BYTES)
+
+
+def test_fetch_with_deadline_returns_the_service_result() -> None:
+    class FakeService:
+        def fetch(self, source, languages):
+            return ("bundle", source, tuple(languages))
+
+    result = fetch_with_deadline(FakeService(), "video", ("en",), timeout=1.0)
+
+    assert result == ("bundle", "video", ("en",))
+
+
+def test_fetch_with_deadline_raises_a_timeout_error() -> None:
+    import time as time_module
+
+    class SlowService:
+        def fetch(self, source, languages):
+            time_module.sleep(0.3)
+            return "late"
+
+    with pytest.raises(TranscriptTimeoutError, match="timed out"):
+        fetch_with_deadline(SlowService(), "video", ("en",), timeout=0.01)

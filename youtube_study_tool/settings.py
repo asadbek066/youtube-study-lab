@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -16,6 +17,19 @@ PROVIDER_LABELS = {
     "azure_openai": "Azure OpenAI",
     "gemini": "Gemini",
 }
+
+
+def _is_valid_http_url(value: str) -> bool:
+    if not value or any(
+        ord(character) < 0x20 or ord(character) == 0x7F for character in value
+    ):
+        return False
+    try:
+        parsed = urlsplit(value)
+        _ = parsed.port  # raises ValueError for an invalid port
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
 
 
 def _read_env(name: str, default: str = "") -> str:
@@ -122,14 +136,19 @@ class LLMSettings:
                 return "Set LLM_MODEL or GEMINI_MODEL."
             return "Set LLM_MODEL or OPENAI_MODEL."
 
-        if self.provider == "openai" and not self.openai_api_key:
-            return "OPENAI_API_KEY is missing."
+        if self.provider == "openai":
+            if not self.openai_api_key:
+                return "OPENAI_API_KEY is missing."
+            if self.openai_base_url and not _is_valid_http_url(self.openai_base_url):
+                return "OPENAI_BASE_URL must be a valid http(s) URL."
 
         if self.provider == "azure_openai":
             if not self.azure_openai_api_key:
                 return "AZURE_OPENAI_API_KEY is missing."
             if not self.azure_openai_endpoint:
                 return "AZURE_OPENAI_ENDPOINT is missing."
+            if not _is_valid_http_url(self.azure_openai_endpoint):
+                return "AZURE_OPENAI_ENDPOINT must be a valid http(s) URL."
 
         if self.provider == "gemini" and not self.gemini_api_key:
             return "GEMINI_API_KEY or GOOGLE_API_KEY is missing."

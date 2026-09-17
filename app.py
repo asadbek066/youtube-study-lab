@@ -6,12 +6,6 @@ from textwrap import dedent
 
 import streamlit as st
 from dotenv import load_dotenv
-from youtube_transcript_api import (
-    CouldNotRetrieveTranscript,
-    NoTranscriptFound,
-    TranscriptsDisabled,
-    YouTubeTranscriptApiException,
-)
 
 from youtube_study_tool.demo import build_demo_transcript
 from youtube_study_tool.fallback import generate_fallback_bundle
@@ -25,6 +19,8 @@ from youtube_study_tool.models import (
 from youtube_study_tool.transcripts import (
     TranscriptRetrievalError,
     TranscriptService,
+    TranscriptTimeoutError,
+    fetch_with_deadline,
     normalize_languages,
 )
 from youtube_study_tool.utils import (
@@ -272,18 +268,31 @@ def render_classification_tab(analysis: AnalysisBundle) -> None:
     st.json(asdict(classification))
 
 
-def compile_study_pack(bundle: TranscriptBundle, analysis: AnalysisBundle) -> str:
-    allowed_timestamp_urls = _allowed_timestamp_urls(bundle)
+def compile_study_pack(
+    bundle: TranscriptBundle,
+    analysis: AnalysisBundle,
+    allowed_timestamp_urls: tuple[str, ...] | None = None,
+) -> str:
+    if allowed_timestamp_urls is None:
+        allowed_timestamp_urls = _allowed_timestamp_urls(bundle)
     title = sanitize_untrusted_markdown(bundle.video_title or bundle.video_id)
     classification_reason = sanitize_untrusted_markdown(analysis.classification.reason)
+    # Caption metadata is remotely supplied; sanitize every exported field.
+    source_label = sanitize_untrusted_markdown(
+        bundle.source_url or bundle.source_label or "Unknown"
+    )
+    language_name = sanitize_untrusted_markdown(bundle.language_name or "Unknown")
+    language_code = sanitize_untrusted_markdown(bundle.language_code or "unknown")
+    provider = sanitize_untrusted_markdown(analysis.provider)
+    model = sanitize_untrusted_markdown(analysis.model)
     return dedent(
         f"""
         # {title}
 
-        Source: {bundle.source_url or bundle.source_label or "Unknown"}
-        Transcript language: {bundle.language_name} ({bundle.language_code})
+        Source: {source_label}
+        Transcript language: {language_name} ({language_code})
         Duration: {format_seconds(bundle.duration_seconds)}
-        Generated with: {analysis.provider} ({analysis.model})
+        Generated with: {provider} ({model})
         Video type: {analysis.classification.video_type} ({analysis.classification.confidence:.2f})
         Classification reason: {classification_reason}
 
@@ -307,7 +316,12 @@ def _allowed_timestamp_urls(bundle: TranscriptBundle) -> tuple[str, ...]:
 def generate_study_pack(
     generator: StudyPackGenerator, bundle: TranscriptBundle
 ) -> AnalysisBundle:
-    """Cap paid submissions per Streamlit session and keep the local fallback available."""
+    """Cap paid submissions per session and keep the local fallback available.
+
+    Only submissions that attempted at least one provider call consume the
+    session budget, so oversized inputs and provider refusals that never reach
+    the provider do not lock the user out of later paid work.
+    """
     if not generator.is_ready:
         return generator.generate(bundle)
     used = int(st.session_state.get("paid_generation_submissions", 0))
@@ -316,9 +330,54 @@ def generate_study_pack(
             "The provider-session limit has been reached. This pack uses local generation "
             "so repeated submissions cannot create unbounded paid calls."
         )
+        generator.last_fallback_reason = ""
         return generate_fallback_bundle(bundle)
-    st.session_state["paid_generation_submissions"] = used + 1
-    return generator.generate(bundle)
+    analysis = generator.generate(bundle)
+    # Count a submission once the provider was actually called, whether or not
+    # its output passed validation, so repeated failing attempts stay bounded.
+    if generator.provider_calls_used > 0:
+        st.session_state["paid_generation_submissions"] = used + 1
+    return analysis
+
+
+def degradation_notice(
+    generator: StudyPackGenerator, analysis: AnalysisBundle
+) -> str | None:
+    """Describe a provider fallback for a pack, or None when none happened."""
+    if (
+        not generator.is_ready
+        or not generator.last_fallback_reason
+        or analysis.provider == generator.provider_label
+    ):
+        return None
+    return (
+        f"{generator.provider_label} was unavailable, so this study pack was "
+        f"generated locally ({generator.last_fallback_reason})."
+    )
+
+
+def remember_degradation_notice(
+    generator: StudyPackGenerator, analysis: AnalysisBundle
+) -> None:
+    notice = degradation_notice(generator, analysis)
+    if notice:
+        st.session_state["degradation_notice"] = notice
+    else:
+        st.session_state.pop("degradation_notice", None)
+
+
+def cached_study_pack(
+    transcript_bundle: TranscriptBundle, analysis_bundle: AnalysisBundle
+) -> tuple[str, tuple[str, ...]]:
+    """Memoize export compilation and the URL allowlist across Streamlit reruns."""
+    cache = st.session_state.get("study_pack_cache")
+    key = (id(transcript_bundle), id(analysis_bundle))
+    if isinstance(cache, dict) and cache.get("key") == key:
+        return cache["text"], cache["urls"]
+    urls = _allowed_timestamp_urls(transcript_bundle)
+    text = compile_study_pack(transcript_bundle, analysis_bundle, urls)
+    st.session_state["study_pack_cache"] = {"key": key, "text": text, "urls": urls}
+    return text, urls
 
 
 def run() -> None:
@@ -408,6 +467,8 @@ def run() -> None:
         # older study pack on the next rerun.
         st.session_state.pop("transcript_bundle", None)
         st.session_state.pop("analysis_bundle", None)
+        st.session_state.pop("study_pack_cache", None)
+        st.session_state.pop("degradation_notice", None)
 
     if demo_requested:
         with st.spinner("Loading the network-free demo..."):
@@ -424,20 +485,18 @@ def run() -> None:
         languages = normalize_languages(language_input)
         try:
             with st.spinner("Pulling transcript from YouTube..."):
-                transcript = transcript_service.fetch(source, languages)
+                transcript = fetch_with_deadline(
+                    transcript_service,
+                    source,
+                    languages,
+                )
             with st.spinner("Building summary, notes, and quiz..."):
                 analysis = generate_study_pack(generator, transcript)
-        except ValueError as error:
+        except TranscriptTimeoutError as error:
             st.error(str(error))
             return
-        except (
-            NoTranscriptFound,
-            TranscriptsDisabled,
-            CouldNotRetrieveTranscript,
-            TranscriptRetrievalError,
-            YouTubeTranscriptApiException,
-        ) as error:
-            logger.warning("Transcript extraction failed: %s", error, exc_info=True)
+        except (ValueError, TranscriptRetrievalError) as error:
+            logger.warning("Transcript extraction failed: %s", type(error).__name__)
             st.error(
                 "Transcript extraction failed. The video may be unavailable, "
                 "blocked, or missing a public caption track."
@@ -450,6 +509,7 @@ def run() -> None:
 
         st.session_state["transcript_bundle"] = transcript
         st.session_state["analysis_bundle"] = analysis
+        remember_degradation_notice(generator, analysis)
     elif manual_submitted:
         try:
             transcript = build_manual_transcript(manual_text, title=manual_title)
@@ -465,6 +525,7 @@ def run() -> None:
 
         st.session_state["transcript_bundle"] = transcript
         st.session_state["analysis_bundle"] = analysis
+        remember_degradation_notice(generator, analysis)
 
     transcript_bundle = st.session_state.get("transcript_bundle")
     analysis_bundle = st.session_state.get("analysis_bundle")
@@ -482,6 +543,9 @@ def run() -> None:
 
     title = transcript_bundle.video_title or transcript_bundle.video_id
     st.markdown(f"### {sanitize_untrusted_markdown(title)}")
+    degradation = st.session_state.get("degradation_notice")
+    if degradation:
+        st.warning(degradation)
     if transcript_bundle.source_url:
         st.video(transcript_bundle.source_url)
     elif transcript_bundle.source_label == "Pasted transcript":
@@ -494,7 +558,9 @@ def run() -> None:
         )
     render_meta(transcript_bundle, analysis_bundle)
 
-    pack_text = compile_study_pack(transcript_bundle, analysis_bundle)
+    pack_text, allowed_timestamp_urls = cached_study_pack(
+        transcript_bundle, analysis_bundle
+    )
     st.download_button(
         label="Download complete study pack (.md)",
         data=pack_text,
@@ -507,7 +573,6 @@ def run() -> None:
         ["Summary", "Study Notes", "Quiz", "Classification", "Transcript"]
     )
     with summary_tab:
-        allowed_timestamp_urls = _allowed_timestamp_urls(transcript_bundle)
         st.markdown(
             sanitize_untrusted_markdown(
                 analysis_bundle.summary, allowed_urls=allowed_timestamp_urls

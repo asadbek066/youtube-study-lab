@@ -220,6 +220,10 @@ def _sanitize_markdown_body(value: str) -> str:
         # Flatten only pathological nesting after the bounded cleanup passes.
         sanitized = sanitized.translate(str.maketrans("[]()", "    "))
     sanitized = BARE_URL_RE.sub("[external link removed]", sanitized)
+    # CommonMark requires the parenthesis to follow the closing bracket with no
+    # whitespace; inserting one neutralizes link syntax that survived the
+    # regex passes because its label contained balanced brackets.
+    sanitized = sanitized.replace("](", "] (")
     return sanitized.replace("<", "&lt;").replace(">", "&gt;")
 
 
@@ -297,13 +301,21 @@ def build_passages(
 
     def split_text(text: str) -> list[str]:
         parts: list[str] = []
-        while len(text) > target_chars:
-            cut = text.rfind(" ", 0, target_chars + 1)
-            cut = cut if cut > 0 else target_chars
-            parts.append(text[:cut].rstrip())
-            text = text[cut:].lstrip()
-        if text:
-            parts.append(text)
+        start = 0
+        length = len(text)
+        while length - start > target_chars:
+            cut = text.rfind(" ", start, start + target_chars + 1)
+            if cut <= start:
+                cut = start + target_chars
+            part = text[start:cut].rstrip()
+            if part:
+                parts.append(part)
+            start = cut
+            while start < length and text[start].isspace():
+                start += 1
+        tail = text[start:].lstrip()
+        if tail:
+            parts.append(tail)
         return parts
 
     for segment in segments:
@@ -412,15 +424,20 @@ def build_chunked_text(
         available = max_chars - len(prefix)
         if available <= 0:
             raise ValueError("max_chars must leave room for a transcript segment")
-        while text:
-            if len(text) <= available:
-                part = text
-                text = ""
+        start = 0
+        length = len(text)
+        while start < length:
+            if length - start <= available:
+                part = text[start:]
+                start = length
             else:
-                cut = text.rfind(" ", 0, available + 1)
-                cut = cut if cut > 0 else available
-                part = text[:cut].rstrip()
-                text = text[cut:].lstrip()
+                cut = text.rfind(" ", start, start + available + 1)
+                if cut <= start:
+                    cut = start + available
+                part = text[start:cut].rstrip()
+                start = cut
+                while start < length and text[start].isspace():
+                    start += 1
             line = prefix + part
             if current_lines and current_length + len(line) + 1 > max_chars:
                 chunks.append("\n".join(current_lines))
