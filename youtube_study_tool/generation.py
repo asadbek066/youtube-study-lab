@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import threading
+from collections import deque
 from itertools import pairwise
+from time import monotonic
 from typing import Any
 
 from google import genai
@@ -39,10 +43,52 @@ MAX_FINAL_EVIDENCE_CHARS = 60_000
 MAX_LLM_CHUNKS = 8
 MAX_PROVIDER_CALLS_PER_GENERATION = 10
 LLM_REQUEST_TIMEOUT_SECONDS = 120
+GENERATION_DEADLINE_SECONDS = 300.0
+DEFAULT_MAX_PROVIDER_CALLS_PER_HOUR = 120
 MARKDOWN_LINK_RE = re.compile(r"!?\[(?:[^\]]*)\]\(([^)]*)\)", re.DOTALL)
 REFERENCE_LINK_RE = re.compile(r"\[[^]]+\]\[[^]]*\]", re.DOTALL)
 BARE_URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 logger = logging.getLogger(__name__)
+
+
+class ProviderCallBudget:
+    """Process-wide sliding-window budget shared by every Streamlit session."""
+
+    def __init__(self, max_calls: int, window_seconds: float) -> None:
+        self.max_calls = max(1, max_calls)
+        self.window_seconds = max(1.0, window_seconds)
+        self._lock = threading.Lock()
+        self._calls: deque[float] = deque()
+
+    def try_reserve(self) -> bool:
+        now = monotonic()
+        with self._lock:
+            cutoff = now - self.window_seconds
+            while self._calls and self._calls[0] <= cutoff:
+                self._calls.popleft()
+            if len(self._calls) >= self.max_calls:
+                return False
+            self._calls.append(now)
+            return True
+
+    def reset(self) -> None:
+        with self._lock:
+            self._calls.clear()
+
+
+def _read_budget_limit() -> int:
+    value = os.getenv("LLM_MAX_PROVIDER_CALLS_PER_HOUR", "").strip()
+    try:
+        parsed = int(value)
+    except ValueError:
+        return DEFAULT_MAX_PROVIDER_CALLS_PER_HOUR
+    return max(1, parsed)
+
+
+PROVIDER_CALL_BUDGET = ProviderCallBudget(
+    max_calls=_read_budget_limit(),
+    window_seconds=3600.0,
+)
 
 LEARNING_ASSISTANT_PROMPT = """
 Role: transcript editor for study materials.
@@ -90,6 +136,10 @@ class GenerationLimitExceeded(RuntimeError):
 class StudyPackGenerator:
     def __init__(self, settings: LLMSettings | None = None) -> None:
         self.settings = settings or load_settings()
+        self.client_error = ""
+        self.last_fallback_reason = ""
+        self._provider_calls = 0
+        self._deadline = float("inf")
         self.client = self._build_client()
 
     @property
@@ -105,56 +155,81 @@ class StudyPackGenerator:
         return self.client is not None and self.settings.is_ready
 
     @property
+    def provider_calls_used(self) -> int:
+        """Provider calls attempted for the most recent generation."""
+        return self._provider_calls
+
+    @property
     def status_message(self) -> str:
+        if self.client is None and self.client_error:
+            return (
+                f"{self.provider_label} is selected, but {self.client_error}. "
+                "Using heuristic fallback."
+            )
         return self.settings.status_message
 
     def generate(self, bundle: TranscriptBundle) -> AnalysisBundle:
+        self.last_fallback_reason = ""
         if self.is_ready:
             try:
                 return self._generate_with_llm(bundle)
             except GenerationLimitExceeded as error:
                 logger.warning("LLM generation skipped: %s", error)
+                self.last_fallback_reason = str(error) or "provider budget reached"
                 return generate_fallback_bundle(bundle)
             except Exception:
                 logger.exception("LLM generation failed, using fallback bundle.")
+                self.last_fallback_reason = "the provider request failed"
                 return generate_fallback_bundle(bundle)
+        if self.client is None and self.client_error:
+            self.last_fallback_reason = self.client_error
         return generate_fallback_bundle(bundle)
 
     def _build_client(self) -> Any | None:
         if not self.settings.is_ready:
             return None
 
-        if self.settings.provider == "openai":
-            kwargs: dict[str, Any] = {
-                "api_key": self.settings.openai_api_key,
-                "timeout": LLM_REQUEST_TIMEOUT_SECONDS,
-                "max_retries": 0,
-            }
-            if self.settings.openai_base_url:
-                kwargs["base_url"] = self.settings.openai_base_url
-            return OpenAI(**kwargs)
+        try:
+            if self.settings.provider == "openai":
+                kwargs: dict[str, Any] = {
+                    "api_key": self.settings.openai_api_key,
+                    "timeout": LLM_REQUEST_TIMEOUT_SECONDS,
+                    "max_retries": 0,
+                }
+                if self.settings.openai_base_url:
+                    kwargs["base_url"] = self.settings.openai_base_url
+                return OpenAI(**kwargs)
 
-        if self.settings.provider == "azure_openai":
-            return OpenAI(
-                api_key=self.settings.azure_openai_api_key,
-                base_url=self.settings.azure_openai_base_url,
-                timeout=LLM_REQUEST_TIMEOUT_SECONDS,
-                max_retries=0,
-            )
+            if self.settings.provider == "azure_openai":
+                return OpenAI(
+                    api_key=self.settings.azure_openai_api_key,
+                    base_url=self.settings.azure_openai_base_url,
+                    timeout=LLM_REQUEST_TIMEOUT_SECONDS,
+                    max_retries=0,
+                )
 
-        if self.settings.provider == "gemini":
-            return genai.Client(
-                api_key=self.settings.gemini_api_key,
-                http_options=genai_types.HttpOptions(
-                    timeout=LLM_REQUEST_TIMEOUT_SECONDS * 1000,
-                    retry_options=genai_types.HttpRetryOptions(attempts=1),
-                ),
+            if self.settings.provider == "gemini":
+                return genai.Client(
+                    api_key=self.settings.gemini_api_key,
+                    http_options=genai_types.HttpOptions(
+                        timeout=LLM_REQUEST_TIMEOUT_SECONDS * 1000,
+                        retry_options=genai_types.HttpRetryOptions(attempts=1),
+                    ),
+                )
+        except Exception:
+            # A malformed endpoint or SDK configuration must degrade to the
+            # local generator instead of crashing every Streamlit rerun.
+            logger.exception(
+                "Could not initialize the %s client.", self.settings.provider
             )
+            self.client_error = "the provider client could not be initialized"
+            return None
 
         return None
 
     def _generate_with_llm(self, bundle: TranscriptBundle) -> AnalysisBundle:
         self._provider_calls = 0
+        self._deadline = monotonic() + GENERATION_DEADLINE_SECONDS
         chunks = build_chunked_text(
             bundle.segments,
             include_timestamps=bundle.duration_seconds > 0,
@@ -274,9 +349,18 @@ class StudyPackGenerator:
     ) -> str:
         if not self.client:
             raise RuntimeError("No model client is configured.")
+        if monotonic() > self._deadline:
+            raise GenerationLimitExceeded(
+                "provider generation exceeded its time budget; using local fallback"
+            )
         if self._provider_calls >= MAX_PROVIDER_CALLS_PER_GENERATION:
             raise GenerationLimitExceeded(
                 "provider call budget reached; using local fallback"
+            )
+        if not PROVIDER_CALL_BUDGET.try_reserve():
+            raise GenerationLimitExceeded(
+                "the server-wide provider call budget for this hour is exhausted; "
+                "using local fallback"
             )
         self._provider_calls += 1
 

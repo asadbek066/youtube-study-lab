@@ -103,16 +103,28 @@ def test_markdown_export_preserves_source_timestamp_links() -> None:
     assert "[00:00](https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=0s)" in exported
 
 
-def _paid_generation_recorder(monkeypatch):
+def _paid_generation_recorder(monkeypatch, *, uses_provider: bool = True):
+    from dataclasses import replace as dataclass_replace
+
     from youtube_study_tool.fallback import generate_fallback_bundle
 
     calls = []
 
     monkeypatch.setattr("app.StudyPackGenerator.is_ready", property(lambda self: True))
+    monkeypatch.setattr(
+        "app.StudyPackGenerator.provider_label", property(lambda self: "OpenAI")
+    )
 
     def record_generate(self, bundle):
         calls.append(bundle.video_id)
-        return generate_fallback_bundle(bundle)
+        analysis = generate_fallback_bundle(bundle)
+        if uses_provider:
+            self.last_fallback_reason = ""
+            self._provider_calls = 3
+            return dataclass_replace(analysis, provider="OpenAI")
+        self.last_fallback_reason = "the provider request failed"
+        self._provider_calls = 0
+        return analysis
 
     monkeypatch.setattr("app.StudyPackGenerator.generate", record_generate)
     return calls
@@ -143,6 +155,7 @@ def test_paid_submission_cap_routes_overflow_to_local_generation(monkeypatch) ->
 
     assert calls == []
     assert "provider-session limit" in "".join(info.value for info in app.info)
+    assert "generated locally" not in " ".join(warning.value for warning in app.warning)
     assert "analysis_bundle" in app.session_state
     assert not app.exception
 
@@ -150,11 +163,117 @@ def test_paid_submission_cap_routes_overflow_to_local_generation(monkeypatch) ->
 def test_paid_submission_counter_increments_only_for_provider_calls(
     monkeypatch,
 ) -> None:
-    calls = _paid_generation_recorder(monkeypatch)
+    calls = _paid_generation_recorder(monkeypatch, uses_provider=True)
 
     app = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
     _submit_manual_transcript(app)
 
     assert len(calls) == 1
     assert app.session_state["paid_generation_submissions"] == 1
+    assert not app.exception
+
+
+def test_paid_counter_ignores_local_fallback_results(monkeypatch) -> None:
+    calls = _paid_generation_recorder(monkeypatch, uses_provider=False)
+
+    app = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
+    _submit_manual_transcript(app)
+
+    assert len(calls) == 1
+    assert "paid_generation_submissions" not in app.session_state
+    assert not app.exception
+
+
+def test_local_fallback_shows_a_degradation_notice(monkeypatch) -> None:
+    _paid_generation_recorder(monkeypatch, uses_provider=False)
+
+    app = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
+    _submit_manual_transcript(app)
+
+    warnings = " ".join(warning.value for warning in app.warning)
+    assert "generated locally" in warnings
+    assert not app.exception
+
+    # The notice is derived from the stored pack and survives a rerun.
+    app.run()
+    warnings_after_rerun = " ".join(warning.value for warning in app.warning)
+    assert "generated locally" in warnings_after_rerun
+
+
+def test_failed_provider_output_still_consumes_the_session_budget(
+    monkeypatch,
+) -> None:
+    calls = _paid_generation_recorder(monkeypatch, uses_provider=False)
+
+    # Simulate a pack where provider calls happened but output was rejected.
+    def record_generate_with_calls(self, bundle):
+        calls.append(bundle.video_id)
+        self._provider_calls = 4
+        self.last_fallback_reason = "the provider request failed"
+        from youtube_study_tool.fallback import generate_fallback_bundle as fallback
+
+        return fallback(bundle)
+
+    monkeypatch.setattr("app.StudyPackGenerator.generate", record_generate_with_calls)
+
+    app = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
+    _submit_manual_transcript(app)
+
+    assert app.session_state["paid_generation_submissions"] == 1
+    assert not app.exception
+
+
+def test_not_ready_generator_does_not_consume_paid_budget() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
+    _submit_manual_transcript(app)
+
+    assert "paid_generation_submissions" not in app.session_state
+    assert not app.exception
+
+
+def test_export_sanitizes_caption_metadata() -> None:
+    from dataclasses import replace
+
+    from app import compile_study_pack
+    from youtube_study_tool.demo import build_demo_transcript
+    from youtube_study_tool.fallback import generate_fallback_bundle
+
+    bundle = replace(
+        build_demo_transcript(),
+        language_name="[a [b]](https://evil.example/phish)",
+        language_code="en-US",
+    )
+    exported = compile_study_pack(bundle, generate_fallback_bundle(bundle))
+
+    assert "](" not in exported
+    assert "evil.example" not in exported
+
+
+def test_compiled_export_is_reused_across_reruns() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
+    app.button(key="instant-demo").click().run()
+    first_cache = app.session_state["study_pack_cache"]
+
+    app.run()
+
+    assert app.session_state["study_pack_cache"] is first_cache
+    assert not app.exception
+
+
+def test_transcript_timeout_surfaces_a_clear_error(monkeypatch) -> None:
+    from youtube_study_tool.transcripts import TranscriptTimeoutError
+
+    def fail(*_args, **_kwargs):
+        raise TranscriptTimeoutError("Transcript retrieval timed out.")
+
+    monkeypatch.setattr("youtube_study_tool.transcripts.fetch_with_deadline", fail)
+
+    app = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
+    app.text_input[0].input("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    next(
+        button for button in app.button if button.label == "Build study pack"
+    ).click().run()
+
+    errors = " ".join(error.value for error in app.error)
+    assert "timed out" in errors
     assert not app.exception
