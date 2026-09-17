@@ -155,3 +155,51 @@ def test_tokenize_keeps_unicode_words() -> None:
 
     assert "künstliche" in tokenize("Künstliche Intelligenz")
     assert tokenize("神经网络") == ["神经网络"]
+
+
+def test_sanitizer_neutralizes_links_with_balanced_brackets() -> None:
+    from youtube_study_tool.utils import sanitize_untrusted_markdown
+
+    hostile = "[a [b]](https://attacker.example/x)"
+    sanitized = sanitize_untrusted_markdown(hostile)
+
+    assert "](" not in sanitized
+    assert "attacker.example" not in sanitized
+    assert "[a [b]]" in sanitized
+
+
+def test_sanitizer_neutralizes_images_with_balanced_brackets() -> None:
+    from youtube_study_tool.utils import sanitize_untrusted_markdown
+
+    sanitized = sanitize_untrusted_markdown(
+        "![pixel [x]](https://tracker.example/p.gif)"
+    )
+
+    assert "](" not in sanitized
+
+
+def test_sanitizer_keeps_allowed_links_after_bracket_neutralization() -> None:
+    from youtube_study_tool.utils import sanitize_untrusted_markdown
+
+    allowed = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=0s"
+    sanitized = sanitize_untrusted_markdown(
+        f"See [00:00]({allowed}) and [a [b]](https://evil.example).",
+        allowed_urls=(allowed,),
+    )
+
+    assert f"[00:00]({allowed})" in sanitized
+    assert "](https://evil.example)" not in sanitized
+
+
+def test_passages_split_oversized_caption_text_into_bounded_parts() -> None:
+    from youtube_study_tool.models import TranscriptSegment
+    from youtube_study_tool.utils import build_passages
+
+    text = "word " * 500
+    segments = (TranscriptSegment(text=text, start=0.0, duration=10.0),)
+
+    passages = build_passages(segments, target_chars=100)
+
+    assert len(passages) > 1
+    assert all(len(passage.text) <= 100 for passage in passages)
+    assert all(passage.start == 0.0 and passage.end == 10.0 for passage in passages)

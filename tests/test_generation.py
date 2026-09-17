@@ -268,3 +268,175 @@ def test_low_vocabulary_source_requires_local_fallback(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="source checks"):
         generator._generate_with_llm(bundle)
+
+
+def _ready_generator() -> StudyPackGenerator:
+    from dataclasses import replace
+
+    base = StudyPackGenerator()
+    settings = replace(
+        base.settings,
+        requested_provider="openai",
+        provider="openai",
+        openai_api_key="test-key",
+        openai_model="gpt-4o-mini",
+    )
+    return StudyPackGenerator(settings)
+
+
+def test_generate_falls_back_when_the_provider_raises(monkeypatch) -> None:
+    generator = _ready_generator()
+    bundle = build_manual_transcript("A model learns from examples and feedback.")
+
+    def boom(_bundle):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(generator, "_generate_with_llm", boom)
+    analysis = generator.generate(bundle)
+
+    assert analysis.provider == "Heuristic fallback"
+    assert generator.last_fallback_reason == "the provider request failed"
+
+
+def test_generate_falls_back_when_the_generation_deadline_is_exceeded(
+    monkeypatch,
+) -> None:
+    import youtube_study_tool.generation as generation_module
+
+    generator = _ready_generator()
+    bundle = build_manual_transcript("A model learns from examples and feedback.")
+    monkeypatch.setattr(generation_module, "GENERATION_DEADLINE_SECONDS", 0.0)
+
+    analysis = generator.generate(bundle)
+
+    assert analysis.provider == "Heuristic fallback"
+    assert "time budget" in generator.last_fallback_reason
+
+
+def test_generate_falls_back_when_the_server_budget_is_spent(monkeypatch) -> None:
+    import youtube_study_tool.generation as generation_module
+    from youtube_study_tool.generation import ProviderCallBudget
+
+    generator = _ready_generator()
+    bundle = build_manual_transcript(
+        "A model learns from examples and feedback while gradient descent "
+        "updates the weights after every prediction error."
+    )
+    # One small pack uses classify + one chunk + final = three calls.
+    budget = ProviderCallBudget(max_calls=3, window_seconds=3600)
+    monkeypatch.setattr(generation_module, "PROVIDER_CALL_BUDGET", budget)
+    monkeypatch.setattr(
+        generator,
+        "_complete_openai_family",
+        lambda *_args, **_kwargs: _valid_llm_output() + "\n" + bundle.transcript_text,
+    )
+
+    first = generator.generate(bundle)
+    second = generator.generate(bundle)
+
+    assert first.provider == "OpenAI"
+    assert second.provider == "Heuristic fallback"
+    assert "budget" in generator.last_fallback_reason
+
+
+def test_client_construction_failure_degrades_instead_of_crashing(monkeypatch) -> None:
+    import youtube_study_tool.generation as generation_module
+
+    generator = _ready_generator()
+    settings = generator.settings
+
+    def broken_openai(**_kwargs):
+        raise RuntimeError("malformed endpoint")
+
+    monkeypatch.setattr(generation_module, "OpenAI", broken_openai)
+    degraded = StudyPackGenerator(settings)
+    bundle = build_manual_transcript("A model learns from examples and feedback.")
+    analysis = degraded.generate(bundle)
+
+    assert degraded.client is None
+    assert degraded.client_error
+    assert not degraded.is_ready
+    assert analysis.provider == "Heuristic fallback"
+    assert "could not be initialized" in degraded.last_fallback_reason
+    assert "could not be initialized" in degraded.status_message
+    assert "ready" not in degraded.status_message.lower()
+
+
+def test_provider_clients_disable_retries_and_bound_timeouts(monkeypatch) -> None:
+    from dataclasses import replace
+
+    import youtube_study_tool.generation as generation_module
+    from youtube_study_tool.generation import LLM_REQUEST_TIMEOUT_SECONDS
+
+    captured: dict = {}
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(generation_module, "OpenAI", FakeOpenAI)
+    base = _ready_generator().settings
+
+    StudyPackGenerator(base)
+    assert captured["max_retries"] == 0
+    assert captured["timeout"] == LLM_REQUEST_TIMEOUT_SECONDS
+
+    azure_settings = replace(
+        base,
+        provider="azure_openai",
+        azure_openai_api_key="key",
+        azure_openai_endpoint="https://example.openai.azure.com",
+        azure_openai_deployment="deployment",
+    )
+    StudyPackGenerator(azure_settings)
+    assert captured["base_url"] == "https://example.openai.azure.com/openai/v1/"
+    assert captured["max_retries"] == 0
+
+    gemini_captured: dict = {}
+
+    class FakeGenai:
+        @staticmethod
+        def Client(**kwargs):
+            gemini_captured.update(kwargs)
+            return object()
+
+    monkeypatch.setattr(generation_module, "genai", FakeGenai)
+    gemini_settings = replace(
+        base,
+        provider="gemini",
+        gemini_api_key="key",
+        gemini_model="gemini-2.5-flash",
+    )
+    StudyPackGenerator(gemini_settings)
+    http_options = gemini_captured["http_options"]
+    assert http_options.timeout == LLM_REQUEST_TIMEOUT_SECONDS * 1000
+    assert http_options.retry_options.attempts == 1
+
+
+def test_multi_chunk_prompts_are_ordered_and_within_budget(monkeypatch) -> None:
+    bundle = build_manual_transcript("alpha beta gamma delta " * 2_500)
+    generator = StudyPackGenerator()
+    generator.client = object()
+    calls: list[tuple[str, str]] = []
+
+    def fake_complete(prompt: str, instructions: str, **_kwargs) -> str:
+        calls.append((instructions, prompt))
+        if instructions == CHUNK_PROMPT:
+            return "A transcript-grounded chunk summary."
+        return _valid_llm_output() + "\n" + bundle.transcript_text
+
+    monkeypatch.setattr(
+        generator, "_classify", lambda _: heuristic_classification(bundle)
+    )
+    monkeypatch.setattr(generator, "_complete", fake_complete)
+
+    generator._generate_with_llm(bundle)
+
+    chunk_prompts = [
+        prompt for instructions, prompt in calls if instructions == CHUNK_PROMPT
+    ]
+    assert len(chunk_prompts) >= 2
+    for index, prompt in enumerate(chunk_prompts, start=1):
+        assert f"Chunk {index} of {len(chunk_prompts)}" in prompt
+    # one final synthesis call around the chunks (classification is stubbed)
+    assert len(calls) == len(chunk_prompts) + 1
