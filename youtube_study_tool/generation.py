@@ -5,9 +5,17 @@ import os
 import re
 import threading
 from collections import deque
+from concurrent.futures import (
+    Future,
+    ThreadPoolExecutor,
+)
+from concurrent.futures import (
+    TimeoutError as FutureTimeoutError,
+)
 from itertools import pairwise
 from time import monotonic
 from typing import Any
+from urllib.parse import urlsplit
 
 from google import genai
 from google.genai import types as genai_types
@@ -44,6 +52,7 @@ MAX_LLM_CHUNKS = 8
 MAX_PROVIDER_CALLS_PER_GENERATION = 10
 LLM_REQUEST_TIMEOUT_SECONDS = 120
 GENERATION_DEADLINE_SECONDS = 300.0
+MAX_CONCURRENT_PROVIDER_REQUESTS = 4
 DEFAULT_MAX_PROVIDER_CALLS_PER_HOUR = 120
 MARKDOWN_LINK_RE = re.compile(r"!?\[(?:[^\]]*)\]\(([^)]*)\)", re.DOTALL)
 REFERENCE_LINK_RE = re.compile(r"\[[^]]+\]\[[^]]*\]", re.DOTALL)
@@ -89,6 +98,11 @@ PROVIDER_CALL_BUDGET = ProviderCallBudget(
     max_calls=_read_budget_limit(),
     window_seconds=3600.0,
 )
+_PROVIDER_EXECUTOR = ThreadPoolExecutor(
+    max_workers=MAX_CONCURRENT_PROVIDER_REQUESTS,
+    thread_name_prefix="provider-request",
+)
+_PROVIDER_ADMISSION = threading.BoundedSemaphore(MAX_CONCURRENT_PROVIDER_REQUESTS)
 
 LEARNING_ASSISTANT_PROMPT = """
 Role: transcript editor for study materials.
@@ -133,6 +147,10 @@ class GenerationLimitExceeded(RuntimeError):
     """Raised when an input would exceed the paid-generation call budget."""
 
 
+class ProviderOutputRejected(ValueError):
+    """Raised when provider output fails the format or source checks."""
+
+
 class StudyPackGenerator:
     def __init__(self, settings: LLMSettings | None = None) -> None:
         self.settings = settings or load_settings()
@@ -140,6 +158,8 @@ class StudyPackGenerator:
         self.last_fallback_reason = ""
         self._provider_calls = 0
         self._deadline = float("inf")
+        self._active_provider_lock = threading.Lock()
+        self._active_provider_client: Any | None = None
         self.client = self._build_client()
 
     @property
@@ -177,6 +197,10 @@ class StudyPackGenerator:
                 logger.warning("LLM generation skipped: %s", error)
                 self.last_fallback_reason = str(error) or "provider budget reached"
                 return generate_fallback_bundle(bundle)
+            except ProviderOutputRejected as error:
+                logger.warning("LLM output rejected: %s", error)
+                self.last_fallback_reason = str(error)
+                return generate_fallback_bundle(bundle)
             except Exception:
                 logger.exception("LLM generation failed, using fallback bundle.")
                 self.last_fallback_reason = "the provider request failed"
@@ -198,15 +222,27 @@ class StudyPackGenerator:
                 }
                 if self.settings.openai_base_url:
                     kwargs["base_url"] = self.settings.openai_base_url
+                    http_client = self._loopback_http_client(
+                        self.settings.openai_base_url
+                    )
+                    if http_client is not None:
+                        kwargs["http_client"] = http_client
                 return OpenAI(**kwargs)
 
             if self.settings.provider == "azure_openai":
-                return OpenAI(
-                    api_key=self.settings.azure_openai_api_key,
-                    base_url=self.settings.azure_openai_base_url,
+                kwargs: dict[str, Any] = {
+                    "api_key": self.settings.azure_openai_api_key,
+                }
+                base_url = self.settings.azure_openai_base_url
+                kwargs.update(
+                    base_url=base_url,
                     timeout=LLM_REQUEST_TIMEOUT_SECONDS,
                     max_retries=0,
                 )
+                http_client = self._loopback_http_client(base_url)
+                if http_client is not None:
+                    kwargs["http_client"] = http_client
+                return OpenAI(**kwargs)
 
             if self.settings.provider == "gemini":
                 return genai.Client(
@@ -226,6 +262,19 @@ class StudyPackGenerator:
             return None
 
         return None
+
+    @staticmethod
+    def _loopback_http_client(base_url: str) -> Any | None:
+        """Keep local HTTP endpoints off environment-configured proxies."""
+        if urlsplit(base_url).scheme.lower() != "http":
+            return None
+        import httpx2
+
+        return httpx2.Client(
+            trust_env=False,
+            follow_redirects=False,
+            timeout=LLM_REQUEST_TIMEOUT_SECONDS,
+        )
 
     def _generate_with_llm(self, bundle: TranscriptBundle) -> AnalysisBundle:
         self._provider_calls = 0
@@ -264,12 +313,17 @@ class StudyPackGenerator:
             max_output_tokens=self.settings.final_max_output_tokens,
             temperature=self.settings.temperature,
         )
-        sections = _parse_sections(response_text)
+        try:
+            sections = _parse_sections(response_text)
+        except (TypeError, ValueError) as error:
+            raise ProviderOutputRejected(
+                "provider output failed the study-pack format check"
+            ) from error
         if not _sections_are_complete(sections) or not _is_source_anchored(
             response_text, bundle
         ):
-            raise ValueError(
-                "The model response did not satisfy the study-pack format or source checks."
+            raise ProviderOutputRejected(
+                "provider output failed the format or source checks"
             )
         return AnalysisBundle(
             summary=sections["summary"],
@@ -357,22 +411,80 @@ class StudyPackGenerator:
             raise GenerationLimitExceeded(
                 "provider call budget reached; using local fallback"
             )
+        request_timeout = self._request_timeout()
+        if not _PROVIDER_ADMISSION.acquire(blocking=False):
+            raise GenerationLimitExceeded(
+                "all bounded provider request slots are occupied; using local fallback"
+            )
         if not PROVIDER_CALL_BUDGET.try_reserve():
+            _PROVIDER_ADMISSION.release()
             raise GenerationLimitExceeded(
                 "the server-wide provider call budget for this hour is exhausted; "
                 "using local fallback"
             )
         self._provider_calls += 1
 
-        if self.settings.provider in {"openai", "azure_openai"}:
-            return self._complete_openai_family(
-                prompt, instructions, max_output_tokens, temperature
+        def request_provider() -> str:
+            with self._active_provider_lock:
+                self._active_provider_client = self.client
+            try:
+                if self.settings.provider in {"openai", "azure_openai"}:
+                    return self._complete_openai_family(
+                        prompt, instructions, max_output_tokens, temperature
+                    )
+                if self.settings.provider == "gemini":
+                    return self._complete_gemini(
+                        prompt, instructions, max_output_tokens, temperature
+                    )
+                raise RuntimeError(f"Unsupported provider: {self.settings.provider}")
+            finally:
+                with self._active_provider_lock:
+                    self._active_provider_client = None
+
+        try:
+            with self._active_provider_lock:
+                self._active_provider_client = self.client
+            future: Future[str] = _PROVIDER_EXECUTOR.submit(request_provider)
+        except BaseException:
+            with self._active_provider_lock:
+                self._active_provider_client = None
+            _PROVIDER_ADMISSION.release()
+            raise
+        future.add_done_callback(lambda _future: _PROVIDER_ADMISSION.release())
+        try:
+            response_text = future.result(timeout=request_timeout)
+        except FutureTimeoutError as error:
+            if future.done():
+                raise
+            self._cancel_active_provider_call()
+            if future.cancel():
+                with self._active_provider_lock:
+                    self._active_provider_client = None
+            raise GenerationLimitExceeded(
+                "provider request exceeded its time budget; using local fallback"
+            ) from error
+        if monotonic() > self._deadline:
+            raise GenerationLimitExceeded(
+                "provider generation exceeded its time budget; using local fallback"
             )
-        if self.settings.provider == "gemini":
-            return self._complete_gemini(
-                prompt, instructions, max_output_tokens, temperature
-            )
-        raise RuntimeError(f"Unsupported provider: {self.settings.provider}")
+        return response_text
+
+    def _cancel_active_provider_call(self) -> None:
+        with self._active_provider_lock:
+            client = self._active_provider_client
+            if client is not None and client is self.client:
+                self.client = None
+                self.client_error = (
+                    "the provider client was closed after a request timeout"
+                )
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                logger.debug(
+                    "Could not close a timed-out provider client.", exc_info=True
+                )
 
     def _complete_openai_family(
         self,
@@ -381,12 +493,14 @@ class StudyPackGenerator:
         max_output_tokens: int,
         temperature: float,
     ) -> str:
+        request_timeout = self._request_timeout()
         response = self.client.responses.create(
             model=self.model_name,
             instructions=instructions,
             input=prompt,
             max_output_tokens=max_output_tokens,
             temperature=temperature,
+            timeout=request_timeout,
         )
         if getattr(response, "output_text", ""):
             return response.output_text.strip()
@@ -406,6 +520,27 @@ class StudyPackGenerator:
         max_output_tokens: int,
         temperature: float,
     ) -> str:
+        request_timeout = self._request_timeout()
+        client = self.client
+        temporary_client = False
+        if request_timeout < LLM_REQUEST_TIMEOUT_SECONDS:
+            client = genai.Client(
+                api_key=self.settings.gemini_api_key,
+                http_options=genai_types.HttpOptions(
+                    timeout=max(1, int(request_timeout * 1000)),
+                    retry_options=genai_types.HttpRetryOptions(attempts=1),
+                ),
+            )
+            temporary_client = True
+            with self._active_provider_lock:
+                self._active_provider_client = client
+        if monotonic() > self._deadline:
+            if temporary_client:
+                client.close()
+            raise GenerationLimitExceeded(
+                "provider generation exceeded its time budget; using local fallback"
+            )
+
         config_kwargs: dict[str, Any] = {
             "system_instruction": instructions,
             "temperature": temperature,
@@ -416,11 +551,15 @@ class StudyPackGenerator:
                 thinking_budget=0
             )
 
-        response = self.client.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=genai_types.GenerateContentConfig(**config_kwargs),
-        )
+        try:
+            response = client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(**config_kwargs),
+            )
+        finally:
+            if temporary_client:
+                client.close()
         if getattr(response, "text", ""):
             return response.text.strip()
 
@@ -432,6 +571,14 @@ class StudyPackGenerator:
                 if text:
                     fragments.append(text)
         return "\n".join(fragments).strip()
+
+    def _request_timeout(self) -> float:
+        remaining = self._deadline - monotonic()
+        if remaining <= 0:
+            raise GenerationLimitExceeded(
+                "provider generation exceeded its time budget; using local fallback"
+            )
+        return min(LLM_REQUEST_TIMEOUT_SECONDS, remaining)
 
 
 def _parse_sections(response_text: str) -> dict[str, str]:

@@ -5,9 +5,12 @@ import logging
 import math
 import random
 import re
+import socket
+import threading
 import time
 from collections.abc import Iterable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import ContextVar
 from html import unescape
 from urllib.parse import parse_qs, urlparse
 
@@ -15,12 +18,25 @@ import requests
 import yt_dlp
 from defusedxml import ElementTree
 from defusedxml.common import DefusedXmlException
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from youtube_transcript_api import (
     NoTranscriptFound,
     Transcript,
     TranscriptList,
     YouTubeTranscriptApi,
 )
+from yt_dlp.networking._requests import (
+    RequestsHTTPAdapter as YtDlpHTTPAdapter,
+)
+from yt_dlp.networking._requests import (
+    RequestsRH as YtDlpRequestsRH,
+)
+from yt_dlp.networking._requests import (
+    RequestsSession as YtDlpRequestsSession,
+)
+from yt_dlp.networking.common import Request as YtDlpRequest
+from yt_dlp.networking.exceptions import RequestError as YtDlpRequestError
 
 from youtube_study_tool.models import (
     MAX_TRANSCRIPT_CHARS,
@@ -36,14 +52,286 @@ MAX_CAPTION_PAYLOAD_BYTES = 2_000_000
 MAX_WATCH_PAYLOAD_BYTES = 8_000_000
 TRANSCRIPT_FETCH_DEADLINE_SECONDS = 90.0
 MAX_RETRY_DELAY_SECONDS = 5.0
+MAX_CONCURRENT_TRANSCRIPT_FETCHES = 4
+MAX_NETWORK_IDLE_TIMEOUT_SECONDS = 5.0
 logger = logging.getLogger(__name__)
 
 # A long-lived executor lets the caller abandon a slow fetch after the
 # wall-clock budget without joining it at the call site (a `with
 # ThreadPoolExecutor` would block on shutdown).
 _FETCH_EXECUTOR = ThreadPoolExecutor(
-    max_workers=4, thread_name_prefix="transcript-fetch"
+    max_workers=MAX_CONCURRENT_TRANSCRIPT_FETCHES,
+    thread_name_prefix="transcript-fetch",
 )
+_FETCH_ADMISSION = threading.BoundedSemaphore(MAX_CONCURRENT_TRANSCRIPT_FETCHES)
+_FETCH_DEADLINE: ContextVar[float | None] = ContextVar("fetch_deadline", default=None)
+
+
+class _FetchCancellation:
+    """Share cancellation and active response handles with the waiting caller."""
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self._lock = threading.Lock()
+        self._responses: set[object] = set()
+        self._persistent_responses: set[object] = set()
+        self._connections: set[object] = set()
+        self.session = _CancellableRequestsSession()
+
+    def register(self, response: object, *, persistent: bool = False) -> None:
+        with self._lock:
+            cancelled = self.event.is_set()
+            if not cancelled:
+                self._responses.add(response)
+                if persistent:
+                    self._persistent_responses.add(response)
+        if cancelled:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+            raise TranscriptTimeoutError(
+                "Transcript retrieval was cancelled after timeout."
+            )
+
+    def release(self, response: object) -> None:
+        with self._lock:
+            self._responses.discard(response)
+            self._persistent_responses.discard(response)
+
+    def release_persistent_responses(self) -> None:
+        with self._lock:
+            responses = tuple(self._persistent_responses)
+            self._persistent_responses.clear()
+            for response in responses:
+                self._responses.discard(response)
+
+    def register_connection(self, connection: object) -> None:
+        with self._lock:
+            cancelled = self.event.is_set()
+            if not cancelled:
+                self._connections.add(connection)
+        if cancelled:
+            _interrupt_fetch_connection(connection)
+            raise TranscriptTimeoutError(
+                "Transcript retrieval was cancelled after timeout."
+            )
+
+    def release_connection(self, connection: object) -> None:
+        with self._lock:
+            self._connections.discard(connection)
+
+    def cancel(self) -> None:
+        self.event.set()
+        with self._lock:
+            responses = tuple(self._responses)
+            connections = tuple(self._connections)
+        for connection in connections:
+            _interrupt_fetch_connection(connection)
+        for response in responses:
+            _interrupt_fetch_response(response)
+
+
+def _interrupt_fetch_connection(connection: object) -> None:
+    sock = getattr(connection, "sock", None)
+    shutdown = getattr(sock, "shutdown", None)
+    if callable(shutdown):
+        try:
+            shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+
+def _interrupt_fetch_response(response: object) -> None:
+    """Interrupt a blocked HTTP response read without waiting on its read lock."""
+    raw = getattr(response, "raw", None) or getattr(response, "fp", None)
+    raw_shutdown = getattr(raw, "_sock_shutdown", None)
+    if callable(raw_shutdown):
+        try:
+            raw_shutdown(socket.SHUT_RDWR)
+            return
+        except OSError:
+            pass
+    connection = getattr(raw, "_connection", None)
+    sock = getattr(connection, "sock", None)
+    if sock is None:
+        file_pointer = getattr(raw, "_fp", None)
+        buffered = getattr(file_pointer, "fp", None)
+        socket_io = getattr(buffered, "raw", None)
+        sock = getattr(socket_io, "_sock", None)
+    if sock is None:
+        response_file = getattr(response, "fp", None)
+        raw_file = getattr(response_file, "fp", None)
+        socket_io = getattr(raw_file, "raw", None)
+        sock = getattr(socket_io, "_sock", None)
+    shutdown = getattr(sock, "shutdown", None)
+    if callable(shutdown):
+        try:
+            shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+
+_FETCH_CANCELLED: ContextVar[_FetchCancellation | None] = ContextVar(
+    "fetch_cancelled", default=None
+)
+
+
+def _check_fetch_context() -> float | None:
+    """Cooperatively stop fetch work when its caller abandons the deadline."""
+    cancellation = _FETCH_CANCELLED.get()
+    if cancellation is not None and cancellation.event.is_set():
+        raise TranscriptTimeoutError(
+            "Transcript retrieval was cancelled after timeout."
+        )
+    deadline = _FETCH_DEADLINE.get()
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TranscriptTimeoutError("Transcript retrieval exceeded its time budget.")
+    return remaining
+
+
+def _register_fetch_response(response: requests.Response) -> None:
+    cancellation = _FETCH_CANCELLED.get()
+    if cancellation is not None:
+        cancellation.register(response)
+
+
+def _release_fetch_response(response: requests.Response) -> None:
+    cancellation = _FETCH_CANCELLED.get()
+    if cancellation is not None:
+        cancellation.release(response)
+    close = getattr(response, "close", None)
+    if callable(close):
+        close()
+
+
+def _bounded_request_timeout(timeout: object, remaining: float | None) -> object:
+    if timeout is None:
+        timeout = MAX_NETWORK_IDLE_TIMEOUT_SECONDS
+    if isinstance(timeout, tuple):
+        connect_timeout, read_timeout = timeout
+    else:
+        connect_timeout = read_timeout = timeout
+
+    connect = min(
+        float(connect_timeout)
+        if connect_timeout is not None
+        else MAX_NETWORK_IDLE_TIMEOUT_SECONDS,
+        MAX_NETWORK_IDLE_TIMEOUT_SECONDS,
+    )
+    read = min(
+        float(read_timeout)
+        if read_timeout is not None
+        else MAX_NETWORK_IDLE_TIMEOUT_SECONDS,
+        MAX_NETWORK_IDLE_TIMEOUT_SECONDS,
+    )
+    if remaining is not None:
+        return min(connect, remaining), read
+    if isinstance(timeout, tuple):
+        return connect, read
+    return connect
+
+
+class _CancellablePoolMixin:
+    """Expose the connection while Requests waits for response headers."""
+
+    def _make_request(self, connection, *args, **kwargs):
+        cancellation = _FETCH_CANCELLED.get()
+        if cancellation is not None:
+            cancellation.register_connection(connection)
+        try:
+            return super()._make_request(connection, *args, **kwargs)
+        finally:
+            if cancellation is not None:
+                cancellation.release_connection(connection)
+
+
+_CANCELLABLE_POOL_CLASSES: dict[type, type] = {}
+_CANCELLABLE_POOL_CLASSES_LOCK = threading.Lock()
+
+
+def _cancellable_pool_class(pool_class: type) -> type:
+    if issubclass(pool_class, _CancellablePoolMixin):
+        return pool_class
+    with _CANCELLABLE_POOL_CLASSES_LOCK:
+        wrapped = _CANCELLABLE_POOL_CLASSES.get(pool_class)
+        if wrapped is None:
+            wrapped = type(
+                f"Cancellable{pool_class.__name__}",
+                (_CancellablePoolMixin, pool_class),
+                {"__module__": __name__},
+            )
+            _CANCELLABLE_POOL_CLASSES[pool_class] = wrapped
+        return wrapped
+
+
+class _CancellableHTTPAdapter(HTTPAdapter):
+    @staticmethod
+    def _configure_pool_classes(manager) -> None:
+        manager.pool_classes_by_scheme = {
+            scheme: _cancellable_pool_class(pool_class)
+            for scheme, pool_class in manager.pool_classes_by_scheme.items()
+        }
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
+        self._configure_pool_classes(self.poolmanager)
+
+    def proxy_manager_for(self, proxy, **proxy_kwargs):
+        manager = super().proxy_manager_for(proxy, **proxy_kwargs)
+        self._configure_pool_classes(manager)
+        return manager
+
+    def send(self, request, **kwargs):
+        response = super().send(request, **kwargs)
+        cancellation = _FETCH_CANCELLED.get()
+        if cancellation is not None:
+            # Requests can consume redirect bodies before Session.get returns.
+            # Keep each adapter response cancellable through that redirect walk.
+            cancellation.register(response, persistent=True)
+        return response
+
+
+class _CancellableYtDlpHTTPAdapter(_CancellableHTTPAdapter, YtDlpHTTPAdapter):
+    pass
+
+
+class _CancellableYtDlpRequestsRH(YtDlpRequestsRH):
+    RH_KEY = YtDlpRequestsRH.RH_KEY
+
+    def _create_instance(self, cookiejar, legacy_ssl_support=None):
+        session = YtDlpRequestsSession()
+        adapter = _CancellableYtDlpHTTPAdapter(
+            ssl_context=self._make_sslcontext(legacy_ssl_support=legacy_ssl_support),
+            source_address=self.source_address,
+            max_retries=Retry(False),
+        )
+        session.adapters.clear()
+        session.headers = requests.models.CaseInsensitiveDict()
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        session.cookies = cookiejar
+        session.trust_env = False
+        return session
+
+    def _send(self, request):
+        try:
+            return super()._send(request)
+        except Exception:
+            try:
+                _check_fetch_context()
+            except TranscriptTimeoutError as timeout_error:
+                raise YtDlpRequestError(cause=timeout_error) from timeout_error
+            raise
+
+
+class _CancellableRequestsSession(requests.Session):
+    def __init__(self) -> None:
+        super().__init__()
+        self.mount("http://", _CancellableHTTPAdapter())
+        self.mount("https://", _CancellableHTTPAdapter())
 
 
 class TranscriptRetrievalError(Exception):
@@ -54,6 +342,10 @@ class TranscriptTimeoutError(TranscriptRetrievalError):
     """Raised when transcript retrieval exceeds its wall-clock budget."""
 
 
+class TranscriptBusyError(TranscriptRetrievalError):
+    """Raised when all bounded transcript-fetch slots are occupied."""
+
+
 def _payload_limit(url: str) -> int:
     # Watch pages and player metadata are HTML/JSON that legitimately exceed the
     # caption ceiling; caption payloads keep the smaller bound.
@@ -62,12 +354,13 @@ def _payload_limit(url: str) -> int:
     return MAX_CAPTION_PAYLOAD_BYTES
 
 
-class _BoundedYouTubeSession(requests.Session):
+class _BoundedYouTubeSession(_CancellableRequestsSession):
     """Materialize YouTube API responses only after enforcing a byte ceiling."""
 
     @staticmethod
     def _materialize(response: requests.Response, limit: int) -> requests.Response:
         try:
+            _check_fetch_context()
             content_length = response.headers.get(
                 "Content-Length"
             ) or response.headers.get("content-length")
@@ -78,6 +371,7 @@ class _BoundedYouTubeSession(requests.Session):
             chunks: list[bytes] = []
             total = 0
             for chunk in response.iter_content(chunk_size=64 * 1024):
+                _check_fetch_context()
                 if not chunk:
                     continue
                 total += len(chunk)
@@ -107,13 +401,55 @@ class _BoundedYouTubeSession(requests.Session):
 
     def get(self, url: str, **kwargs: object) -> requests.Response:
         kwargs["stream"] = True
-        kwargs.setdefault("timeout", 20)
-        return self._materialize(super().get(url, **kwargs), _payload_limit(url))
+        remaining = _check_fetch_context()
+        kwargs["timeout"] = _bounded_request_timeout(
+            kwargs.get("timeout", MAX_NETWORK_IDLE_TIMEOUT_SECONDS), remaining
+        )
+        response = super().get(url, **kwargs)
+        try:
+            _register_fetch_response(response)
+            return self._materialize(response, _payload_limit(url))
+        finally:
+            _release_fetch_response(response)
 
     def post(self, url: str, **kwargs: object) -> requests.Response:
         kwargs["stream"] = True
-        kwargs.setdefault("timeout", 20)
-        return self._materialize(super().post(url, **kwargs), _payload_limit(url))
+        remaining = _check_fetch_context()
+        kwargs["timeout"] = _bounded_request_timeout(
+            kwargs.get("timeout", MAX_NETWORK_IDLE_TIMEOUT_SECONDS), remaining
+        )
+        response = super().post(url, **kwargs)
+        try:
+            _register_fetch_response(response)
+            return self._materialize(response, _payload_limit(url))
+        finally:
+            _release_fetch_response(response)
+
+
+class _DeadlineYoutubeDL(yt_dlp.YoutubeDL):
+    """Check the fetch budget before each network request made by yt-dlp."""
+
+    def build_request_director(self, handlers, preferences=None):
+        wrapped_handlers = (
+            _CancellableYtDlpRequestsRH if handler is YtDlpRequestsRH else handler
+            for handler in handlers
+        )
+        return super().build_request_director(wrapped_handlers, preferences)
+
+    def urlopen(self, req):
+        remaining = _check_fetch_context()
+        if remaining is not None:
+            if isinstance(req, str):
+                req = YtDlpRequest(req)
+            if isinstance(req, YtDlpRequest):
+                req.extensions["timeout"] = min(
+                    remaining, MAX_NETWORK_IDLE_TIMEOUT_SECONDS
+                )
+        response = super().urlopen(req)
+        cancellation = _FETCH_CANCELLED.get()
+        if cancellation is not None:
+            cancellation.register(response, persistent=True)
+        return response
 
 
 def extract_video_id(raw_value: str) -> str:
@@ -188,6 +524,7 @@ class TranscriptService:
     def fetch(
         self, source: str, preferred_languages: Iterable[str]
     ) -> TranscriptBundle:
+        _check_fetch_context()
         video_id = extract_video_id(source)
         source_url = f"https://www.youtube.com/watch?v={video_id}"
         languages = tuple(
@@ -201,7 +538,10 @@ class TranscriptService:
             return self._fetch_with_youtube_transcript_api(
                 video_id, source_url, languages
             )
+        except TranscriptTimeoutError:
+            raise
         except Exception as error:  # noqa: BLE001 - either backend may fail with library-specific errors.
+            _check_fetch_context()
             primary_error = error
             logger.info(
                 "Primary transcript backend failed for %s: %s",
@@ -211,7 +551,10 @@ class TranscriptService:
 
         try:
             return self._fetch_with_ytdlp(video_id, source_url, languages)
+        except TranscriptTimeoutError:
+            raise
         except Exception as fallback_error:
+            _check_fetch_context()
             raise TranscriptRetrievalError(
                 "Transcript extraction failed with both backends.\n\n"
                 f"Primary backend error: {type(primary_error).__name__}.\n"
@@ -249,6 +592,8 @@ class TranscriptService:
             raise TranscriptRetrievalError(
                 f"Transcript is too long; keep it under {MAX_TRANSCRIPT_CHARS:,} characters."
             )
+        video_title = self._fetch_video_title(source_url)
+        _check_fetch_context()
         return TranscriptBundle(
             video_id=video_id,
             source_url=source_url,
@@ -259,7 +604,7 @@ class TranscriptService:
             is_generated=bool(getattr(transcript, "is_generated", False)),
             duration_seconds=_duration_seconds(segments),
             word_count=len(transcript_text.split()),
-            video_title=self._fetch_video_title(source_url),
+            video_title=video_title,
         )
 
     def _fetch_with_ytdlp(
@@ -286,6 +631,10 @@ class TranscriptService:
             raise TranscriptRetrievalError(
                 f"Transcript is too long; keep it under {MAX_TRANSCRIPT_CHARS:,} characters."
             )
+        video_title = clean_whitespace(str(info.get("title") or ""))
+        if not video_title:
+            video_title = self._fetch_video_title(source_url) or ""
+        _check_fetch_context()
         return TranscriptBundle(
             video_id=video_id,
             source_url=source_url,
@@ -296,8 +645,7 @@ class TranscriptService:
             is_generated=is_generated,
             duration_seconds=_duration_seconds(segments),
             word_count=len(transcript_text.split()),
-            video_title=clean_whitespace(str(info.get("title") or ""))
-            or self._fetch_video_title(source_url),
+            video_title=video_title or None,
         )
 
     def _select_transcript(
@@ -346,15 +694,27 @@ class TranscriptService:
         )
 
     def _extract_video_info(self, source_url: str) -> dict:
+        remaining = _check_fetch_context()
         options = {
             "skip_download": True,
             "quiet": True,
             "no_warnings": True,
             "extract_flat": False,
-            "socket_timeout": 20,
+            "socket_timeout": (
+                min(MAX_NETWORK_IDLE_TIMEOUT_SECONDS, remaining)
+                if remaining is not None
+                else MAX_NETWORK_IDLE_TIMEOUT_SECONDS
+            ),
         }
-        with yt_dlp.YoutubeDL(options) as downloader:
-            return downloader.extract_info(source_url, download=False)
+        cancellation = _FETCH_CANCELLED.get()
+        try:
+            with _DeadlineYoutubeDL(options) as downloader:
+                info = downloader.extract_info(source_url, download=False)
+        finally:
+            if cancellation is not None:
+                cancellation.release_persistent_responses()
+        _check_fetch_context()
+        return info
 
     def _select_caption_track(
         self,
@@ -478,6 +838,7 @@ class TranscriptService:
     def _read_caption_response(self, response: requests.Response) -> str:
         """Read a caption response incrementally under the byte ceiling."""
         try:
+            _check_fetch_context()
             headers = getattr(response, "headers", {})
             content_length = headers.get("Content-Length") or headers.get(
                 "content-length"
@@ -499,6 +860,7 @@ class TranscriptService:
                 chunks: list[bytes] = []
                 total = 0
                 for chunk in iterator(chunk_size=64 * 1024):
+                    _check_fetch_context()
                     if not chunk:
                         continue
                     if isinstance(chunk, str):
@@ -521,6 +883,7 @@ class TranscriptService:
                         "Caption track is too large to process safely."
                     )
                 raw = content
+            _check_fetch_context()
             content_type = str(
                 headers.get("Content-Type") or headers.get("content-type") or ""
             )
@@ -538,9 +901,7 @@ class TranscriptService:
                     "Caption track returned invalid text encoding."
                 ) from error
         finally:
-            close = getattr(response, "close", None)
-            if callable(close):
-                close()
+            _release_fetch_response(response)
 
     def _normalize_segments(
         self, segments: Iterable[TranscriptSegment]
@@ -690,6 +1051,8 @@ class TranscriptService:
                 params={"url": source_url, "format": "json"},
             )
             payload = json.loads(self._read_caption_response(response))
+        except TranscriptTimeoutError:
+            raise
         except (
             requests.RequestException,
             TranscriptRetrievalError,
@@ -713,7 +1076,8 @@ class TranscriptService:
                 "Caption endpoint returned invalid JSON."
             ) from error
         finally:
-            response.close()
+            _release_fetch_response(response)
+        _check_fetch_context()
         if not isinstance(payload, dict):
             raise TranscriptRetrievalError(
                 "Caption endpoint returned a non-object JSON payload."
@@ -733,14 +1097,26 @@ class TranscriptService:
         for attempt in range(max(1, retries)):
             response: requests.Response | None = None
             try:
-                response = requests.get(
-                    url, params=params, timeout=timeout, stream=stream
+                remaining = _check_fetch_context()
+                cancellation = _FETCH_CANCELLED.get()
+                get = cancellation.session.get if cancellation else requests.get
+                response = get(
+                    url,
+                    params=params,
+                    timeout=_bounded_request_timeout(timeout, remaining),
+                    stream=stream,
                 )
+                _register_fetch_response(response)
                 response.raise_for_status()
+                _check_fetch_context()
                 return response
+            except TranscriptTimeoutError:
+                if response is not None:
+                    _release_fetch_response(response)
+                raise
             except requests.RequestException as error:
                 if response is not None:
-                    response.close()
+                    _release_fetch_response(response)
                 status = getattr(getattr(error, "response", None), "status_code", None)
                 last_error = type(error).__name__
                 if status is not None:
@@ -762,6 +1138,9 @@ class TranscriptService:
                         pass
                     delay = min(delay, MAX_RETRY_DELAY_SECONDS)
                     delay += random.uniform(0, 0.25)
+                    remaining = _check_fetch_context()
+                    if remaining is not None:
+                        delay = min(delay, remaining)
                     time.sleep(delay)
         raise TranscriptRetrievalError(
             f"Failed to download caption track after {retries} attempts: {last_error}"
@@ -777,14 +1156,42 @@ def fetch_with_deadline(
 ) -> TranscriptBundle:
     """Run transcript retrieval under a wall-clock bound.
 
-    The worker thread cannot be cancelled, but per-request timeouts bound how
-    long it can outlive the abandoned call.
+    The worker cooperatively stops after cancellation. Active requests responses
+    are closed when the caller's deadline expires, and admission is bounded so
+    timed-out calls cannot accumulate behind occupied workers.
     """
-    future: Future = _FETCH_EXECUTOR.submit(service.fetch, source, preferred_languages)
+    if not _FETCH_ADMISSION.acquire(blocking=False):
+        raise TranscriptBusyError(
+            "Transcript retrieval is busy. Please wait a moment and try again."
+        )
+    deadline = time.monotonic() + max(0.0, timeout)
+    cancelled = _FetchCancellation()
+
+    def worker() -> TranscriptBundle:
+        deadline_token = _FETCH_DEADLINE.set(deadline)
+        cancelled_token = _FETCH_CANCELLED.set(cancelled)
+        try:
+            _check_fetch_context()
+            return service.fetch(source, preferred_languages)
+        finally:
+            cancelled.release_persistent_responses()
+            cancelled.session.close()
+            _FETCH_DEADLINE.reset(deadline_token)
+            _FETCH_CANCELLED.reset(cancelled_token)
+
     try:
-        return future.result(timeout=timeout)
+        future: Future = _FETCH_EXECUTOR.submit(worker)
+    except BaseException:
+        _FETCH_ADMISSION.release()
+        cancelled.session.close()
+        raise
+    future.add_done_callback(lambda _future: _FETCH_ADMISSION.release())
+    try:
+        return future.result(timeout=max(0.0, deadline - time.monotonic()))
     except TimeoutError as error:
-        future.cancel()
+        cancelled.cancel()
+        if future.cancel():
+            cancelled.session.close()
         raise TranscriptTimeoutError(
             "Transcript retrieval timed out. YouTube may be slow or blocking "
             "this server; paste the transcript instead."

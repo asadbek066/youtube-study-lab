@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -19,7 +20,8 @@ PROVIDER_LABELS = {
 }
 
 
-def _is_valid_http_url(value: str) -> bool:
+def _is_secure_provider_url(value: str) -> bool:
+    """Require TLS for remote model endpoints; allow plain HTTP only on loopback."""
     if not value or any(
         ord(character) < 0x20 or ord(character) == 0x7F for character in value
     ):
@@ -29,7 +31,22 @@ def _is_valid_http_url(value: str) -> bool:
         _ = parsed.port  # raises ValueError for an invalid port
     except ValueError:
         return False
-    return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+    hostname = parsed.hostname
+    if not hostname or parsed.username is not None or parsed.password is not None:
+        return False
+    scheme = parsed.scheme.lower()
+    if scheme == "https":
+        return True
+    if scheme != "http":
+        return False
+
+    hostname = hostname.rstrip(".").lower()
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def _read_env(name: str, default: str = "") -> str:
@@ -139,16 +156,18 @@ class LLMSettings:
         if self.provider == "openai":
             if not self.openai_api_key:
                 return "OPENAI_API_KEY is missing."
-            if self.openai_base_url and not _is_valid_http_url(self.openai_base_url):
-                return "OPENAI_BASE_URL must be a valid http(s) URL."
+            if self.openai_base_url and not _is_secure_provider_url(
+                self.openai_base_url
+            ):
+                return "OPENAI_BASE_URL must use HTTPS; HTTP is allowed only for loopback hosts."
 
         if self.provider == "azure_openai":
             if not self.azure_openai_api_key:
                 return "AZURE_OPENAI_API_KEY is missing."
             if not self.azure_openai_endpoint:
                 return "AZURE_OPENAI_ENDPOINT is missing."
-            if not _is_valid_http_url(self.azure_openai_endpoint):
-                return "AZURE_OPENAI_ENDPOINT must be a valid http(s) URL."
+            if not _is_secure_provider_url(self.azure_openai_endpoint):
+                return "AZURE_OPENAI_ENDPOINT must use HTTPS; HTTP is allowed only for loopback hosts."
 
         if self.provider == "gemini" and not self.gemini_api_key:
             return "GEMINI_API_KEY or GOOGLE_API_KEY is missing."

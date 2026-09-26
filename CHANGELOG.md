@@ -8,6 +8,9 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 ### Added
 
+- CI now verifies direct runtime/development pins are represented in the matching hash lock.
+- Bounded transcript-fetch admission; saturated servers reject excess requests instead of queueing timed-out work.
+- Bounded provider-call admission and close timed-out clients when a generation budget expires.
 - One-click, network-free instant demo with an original sample transcript.
 - Pasted-transcript fallback for environments where YouTube blocks server-side caption retrieval.
 - Streamlit interaction tests for the landing page and generated study-pack flow.
@@ -21,6 +24,11 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 ### Changed
 
+- Require HTTPS for remote OpenAI/Azure endpoints; permit HTTP only for loopback development endpoints.
+- Regenerated both hash locks for the latest tested OpenAI, Google GenAI, Streamlit, and Ruff pins.
+- Discard provider results returned after the generation deadline, and describe output-validation fallbacks accurately.
+- Keep the fallback notice visible when a timed-out provider client is closed.
+- Stop timed-out transcript reads during response headers, caption streaming, and yt-dlp response handling.
 - Bound caption downloads before parsing, kept provider input data in escaped
   JSON, and routed oversized LLM jobs to the local fallback.
 - Reworked the landing page around a clearer no-key value proposition.

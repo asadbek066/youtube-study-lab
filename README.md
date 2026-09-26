@@ -128,6 +128,7 @@ Useful settings from `.env.example` include:
 
 - `LLM_PROVIDER`: `heuristic`, `openai`, `azure_openai`, or `gemini`
 - Provider model/deployment and API credentials
+- Custom OpenAI/Azure endpoints must use HTTPS. Plain HTTP is accepted only for loopback development endpoints such as `localhost` or `127.0.0.1`.
 - `SUMMARY_STYLE` and `SUMMARY_DETAIL`
 - Output-token limits for the configured provider
 - `LLM_MAX_PROVIDER_CALLS_PER_HOUR`: process-wide provider-call budget shared
@@ -143,11 +144,15 @@ Install the dependencies, then run:
 
 ```bash
 python -m pip install --require-hashes -r requirements-dev.lock
+python tools/check_requirement_locks.py
 python -m ruff check app.py youtube_study_tool tests
 python -m ruff format --check app.py youtube_study_tool tests
 python -m pytest tests -q
 python -m compileall -q app.py youtube_study_tool tests
 ```
+
+After changing a direct dependency pin, regenerate the corresponding hash lock;
+CI checks that both locks still satisfy their source requirements.
 
 The GitHub Actions workflow runs lint, formatting, byte-compilation, dependency
 consistency, and the test suite on Python 3.11 through 3.14 for pushes and pull
@@ -168,11 +173,12 @@ requirements-dev.txt --universal --python-version 3.11 --generate-hashes`.
   session budget; with multiple worker processes, each process gets its own
   budget. This bounds spend but is not an account-wide rate limiter or spend
   guarantee.
-- Provider generation also stops after a 300-second time budget and each
-  provider request after 120 seconds; when a bound is hit the pack falls back
-  to local generation with a visible notice.
-- Transcript retrieval stops after a 90-second wall-clock budget; exceeding it
-  shows a clear error and produces no pack (paste the transcript instead).
+- Provider calls use a four-slot process-wide pool. Each request waits for the
+  smaller of 120 seconds or the remaining 300-second generation budget; if it
+  times out, the active client is closed and the pack falls back locally.
+- Transcript retrieval has a 90-second caller budget and a four-request
+  process-wide admission limit. Saturated servers reject excess work with
+  retry guidance, and timed-out network reads stop cooperatively.
 - Provider output passes format, source-vocabulary, and citation-link checks;
   those checks reduce obvious fabrication but are not an independent factual
   verification system.

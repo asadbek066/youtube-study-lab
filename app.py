@@ -17,6 +17,7 @@ from youtube_study_tool.models import (
     TranscriptBundle,
 )
 from youtube_study_tool.transcripts import (
+    TranscriptBusyError,
     TranscriptRetrievalError,
     TranscriptService,
     TranscriptTimeoutError,
@@ -345,14 +346,13 @@ def degradation_notice(
 ) -> str | None:
     """Describe a provider fallback for a pack, or None when none happened."""
     if (
-        not generator.is_ready
-        or not generator.last_fallback_reason
+        not generator.last_fallback_reason
         or analysis.provider == generator.provider_label
     ):
         return None
     return (
-        f"{generator.provider_label} was unavailable, so this study pack was "
-        f"generated locally ({generator.last_fallback_reason})."
+        f"This study pack was generated locally instead of {generator.provider_label} "
+        f"({generator.last_fallback_reason})."
     )
 
 
@@ -494,6 +494,9 @@ def run() -> None:
                 analysis = generate_study_pack(generator, transcript)
         except TranscriptTimeoutError as error:
             st.error(str(error))
+            return
+        except TranscriptBusyError as error:
+            st.info(str(error))
             return
         except (ValueError, TranscriptRetrievalError) as error:
             logger.warning("Transcript extraction failed: %s", type(error).__name__)

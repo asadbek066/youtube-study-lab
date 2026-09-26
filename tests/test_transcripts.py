@@ -8,6 +8,7 @@ from youtube_study_tool.models import MAX_TRANSCRIPT_CHARS, TranscriptSegment
 from youtube_study_tool.transcripts import (
     MAX_CAPTION_PAYLOAD_BYTES,
     MAX_WATCH_PAYLOAD_BYTES,
+    TranscriptBusyError,
     TranscriptRetrievalError,
     TranscriptService,
     TranscriptTimeoutError,
@@ -497,7 +498,7 @@ def test_fetch_video_title_passes_source_url_to_oembed(monkeypatch) -> None:
             "https://www.youtube.com/oembed",
             {
                 "params": {"url": source_url, "format": "json"},
-                "timeout": 10,
+                "timeout": 5.0,
                 "stream": True,
             },
         )
@@ -832,6 +833,26 @@ def test_payload_limit_separates_watch_pages_from_captions() -> None:
     )
 
 
+def test_cancellable_pool_adapter_preserves_specialized_proxy_pools() -> None:
+    from types import SimpleNamespace
+
+    from urllib3 import HTTPConnectionPool
+
+    import youtube_study_tool.transcripts as transcripts_module
+
+    class OptionalSocksPool(HTTPConnectionPool):
+        pass
+
+    manager = SimpleNamespace(
+        pool_classes_by_scheme={"http": OptionalSocksPool, "https": OptionalSocksPool}
+    )
+
+    transcripts_module._CancellableHTTPAdapter._configure_pool_classes(manager)
+
+    assert issubclass(manager.pool_classes_by_scheme["http"], OptionalSocksPool)
+    assert issubclass(manager.pool_classes_by_scheme["https"], OptionalSocksPool)
+
+
 class _CaptionResponse:
     def __init__(self, chunks, headers=None, encoding=None) -> None:
         self._chunks = list(chunks)
@@ -976,3 +997,481 @@ def test_fetch_with_deadline_raises_a_timeout_error() -> None:
 
     with pytest.raises(TranscriptTimeoutError, match="timed out"):
         fetch_with_deadline(SlowService(), "video", ("en",), timeout=0.01)
+
+
+def test_timed_out_fetches_cannot_fill_an_unbounded_worker_queue(monkeypatch) -> None:
+    import queue
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    import youtube_study_tool.transcripts as transcripts_module
+
+    worker_count = transcripts_module.MAX_CONCURRENT_TRANSCRIPT_FETCHES
+    executor = ThreadPoolExecutor(max_workers=worker_count)
+    admission = threading.BoundedSemaphore(worker_count)
+    monkeypatch.setattr(transcripts_module, "_FETCH_EXECUTOR", executor)
+    monkeypatch.setattr(transcripts_module, "_FETCH_ADMISSION", admission)
+    started: queue.Queue[None] = queue.Queue()
+    finished: queue.Queue[None] = queue.Queue()
+    results: queue.Queue[BaseException | None] = queue.Queue()
+
+    class BlockedService:
+        def fetch(self, _source: str, _languages: tuple[str, ...]) -> None:
+            started.put(None)
+            try:
+                while True:
+                    transcripts_module._check_fetch_context()
+                    time.sleep(0.005)
+            except TranscriptTimeoutError:
+                finished.put(None)
+                raise
+
+    def submit_blocked_request() -> None:
+        try:
+            fetch_with_deadline(BlockedService(), "video", ("en",), timeout=1.0)
+        except TranscriptTimeoutError as error:
+            results.put(error)
+        else:
+            results.put(None)
+
+    try:
+        callers = [
+            threading.Thread(target=submit_blocked_request) for _ in range(worker_count)
+        ]
+        for caller in callers:
+            caller.start()
+        for _ in range(worker_count):
+            started.get(timeout=2)
+
+        started_at = time.monotonic()
+        with pytest.raises(TranscriptBusyError, match="busy"):
+            fetch_with_deadline(BlockedService(), "video", ("en",), timeout=0.01)
+        assert time.monotonic() - started_at < 0.5
+        assert started.empty()
+
+        for caller in callers:
+            caller.join(timeout=2)
+            assert not caller.is_alive()
+        assert all(
+            isinstance(results.get(timeout=1), TranscriptTimeoutError)
+            for _ in range(worker_count)
+        )
+        for _ in range(worker_count):
+            finished.get(timeout=1)
+
+        class QuickService:
+            def fetch(self, _source: str, _languages: tuple[str, ...]) -> str:
+                return "recovered"
+
+        assert fetch_with_deadline(QuickService(), "video", ("en",), timeout=1.0) == (
+            "recovered"
+        )
+    finally:
+        executor.shutdown(wait=True)
+
+
+def test_timed_out_transcript_workers_free_slots_without_external_intervention(
+    monkeypatch,
+) -> None:
+    import queue
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    import youtube_study_tool.transcripts as transcripts_module
+
+    worker_count = transcripts_module.MAX_CONCURRENT_TRANSCRIPT_FETCHES
+    executor = ThreadPoolExecutor(max_workers=worker_count)
+    admission = threading.BoundedSemaphore(worker_count)
+    monkeypatch.setattr(transcripts_module, "_FETCH_EXECUTOR", executor)
+    monkeypatch.setattr(transcripts_module, "_FETCH_ADMISSION", admission)
+    started: queue.Queue[None] = queue.Queue()
+    finished: queue.Queue[None] = queue.Queue()
+    results: queue.Queue[BaseException | None] = queue.Queue()
+
+    class CooperativeService:
+        def fetch(self, _source: str, _languages: tuple[str, ...]) -> None:
+            started.put(None)
+            try:
+                while True:
+                    transcripts_module._check_fetch_context()
+                    time.sleep(0.005)
+            except TranscriptTimeoutError:
+                finished.put(None)
+                raise
+
+    def call_fetch() -> None:
+        try:
+            fetch_with_deadline(CooperativeService(), "video", ("en",), timeout=0.5)
+        except TranscriptTimeoutError as error:
+            results.put(error)
+        else:
+            results.put(None)
+
+    callers = [threading.Thread(target=call_fetch) for _ in range(worker_count)]
+    try:
+        for caller in callers:
+            caller.start()
+        for _ in range(worker_count):
+            started.get(timeout=2)
+
+        with pytest.raises(TranscriptBusyError, match="busy"):
+            fetch_with_deadline(CooperativeService(), "video", ("en",), timeout=0.1)
+
+        for caller in callers:
+            caller.join(timeout=2)
+            assert not caller.is_alive()
+        assert all(
+            isinstance(results.get(timeout=1), TranscriptTimeoutError)
+            for _ in range(worker_count)
+        )
+        for _ in range(worker_count):
+            finished.get(timeout=1)
+
+        class QuickService:
+            def fetch(self, _source: str, _languages: tuple[str, ...]) -> str:
+                return "recovered"
+
+        assert fetch_with_deadline(QuickService(), "video", ("en",), timeout=1.0) == (
+            "recovered"
+        )
+    finally:
+        executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("client_kind", ["direct", "bounded_session"])
+def test_timed_out_streaming_response_is_closed_and_releases_worker(
+    client_kind: str,
+) -> None:
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import youtube_study_tool.transcripts as transcripts_module
+
+    started = threading.Event()
+    server_finished = threading.Event()
+    stop_stream = threading.Event()
+
+    class SlowStreamHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", "100000")
+            self.end_headers()
+            started.set()
+            try:
+                for _ in range(100_000):
+                    if stop_stream.wait(0.01):
+                        break
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                server_finished.set()
+
+        def log_message(self, *_args) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowStreamHandler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    service = TranscriptService()
+    worker_finished = threading.Event()
+    url = f"http://127.0.0.1:{server.server_port}/slow"
+
+    class StreamingService:
+        def fetch(self, _source, _languages):
+            try:
+                if client_kind == "bounded_session":
+                    with transcripts_module._BoundedYouTubeSession() as session:
+                        return session.get(url)
+                response = service._get_response_with_retries(
+                    url, timeout=5.0, stream=True
+                )
+                return service._read_caption_response(response)
+            finally:
+                worker_finished.set()
+
+    try:
+        with pytest.raises(TranscriptTimeoutError, match="timed out"):
+            fetch_with_deadline(StreamingService(), "video", ("en",), timeout=0.2)
+
+        assert started.wait(1.0)
+        assert worker_finished.wait(1.0)
+        assert server_finished.wait(1.0)
+
+        class QuickService:
+            def fetch(self, _source, _languages):
+                return "recovered"
+
+        assert fetch_with_deadline(QuickService(), "video", ("en",), timeout=1.0) == (
+            "recovered"
+        )
+    finally:
+        stop_stream.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1.0)
+        worker_finished.wait(1.0)
+
+
+@pytest.mark.parametrize("client_kind", ["direct", "bounded_session", "ytdlp"])
+def test_timed_out_slow_response_headers_interrupt_the_active_connection(
+    client_kind: str,
+) -> None:
+    import socketserver
+    import threading
+    import time
+
+    import youtube_study_tool.transcripts as transcripts_module
+
+    started = threading.Event()
+    server_finished = threading.Event()
+
+    class SlowHeaderHandler(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            try:
+                self.request.recv(4096)
+                self.request.sendall(b"HTTP/1.1 200 OK\r\nX-Slow: ")
+                started.set()
+                for _ in range(100):
+                    self.request.sendall(b"a")
+                    time.sleep(0.03)
+                self.request.sendall(b"\r\nContent-Length: 2\r\n\r\nok")
+                self.request.settimeout(2.0)
+                self.request.recv(1)
+            except OSError:
+                pass
+            finally:
+                server_finished.set()
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), SlowHeaderHandler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    worker_finished = threading.Event()
+    service = TranscriptService()
+    url = f"http://127.0.0.1:{server.server_address[1]}/slow-headers"
+
+    class HeaderService:
+        def fetch(self, _source, _languages):
+            try:
+                if client_kind == "ytdlp":
+                    with transcripts_module._DeadlineYoutubeDL(
+                        {"quiet": True, "no_warnings": True, "socket_timeout": 5}
+                    ) as downloader:
+                        return downloader.urlopen(url)
+                if client_kind == "bounded_session":
+                    with transcripts_module._BoundedYouTubeSession() as session:
+                        return session.get(url)
+                return service._get_response_with_retries(url, timeout=5.0, stream=True)
+            finally:
+                worker_finished.set()
+
+    try:
+        with pytest.raises(TranscriptTimeoutError, match="timed out"):
+            fetch_with_deadline(HeaderService(), "video", ("en",), timeout=0.5)
+
+        assert started.wait(1.0)
+        assert worker_finished.wait(1.0)
+        assert server_finished.wait(1.0)
+
+        class QuickService:
+            def fetch(self, _source, _languages):
+                return "recovered"
+
+        assert fetch_with_deadline(QuickService(), "video", ("en",), timeout=1.0) == (
+            "recovered"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1.0)
+
+
+def test_timed_out_redirect_body_is_interrupted_before_following_location() -> None:
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    started = threading.Event()
+    server_finished = threading.Event()
+
+    class SlowRedirectHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path != "/start":
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+                return
+
+            self.send_response(302)
+            self.send_header("Location", "/final")
+            self.send_header("Content-Length", "100")
+            self.end_headers()
+            started.set()
+            try:
+                for _ in range(100):
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(0.03)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                server_finished.set()
+
+        def log_message(self, *_args) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowRedirectHandler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    service = TranscriptService()
+    worker_finished = threading.Event()
+    url = f"http://127.0.0.1:{server.server_port}/start"
+
+    class RedirectService:
+        def fetch(self, _source, _languages):
+            try:
+                return service._get_response_with_retries(url, timeout=5.0, stream=True)
+            finally:
+                worker_finished.set()
+
+    try:
+        with pytest.raises(TranscriptTimeoutError, match="timed out"):
+            fetch_with_deadline(RedirectService(), "video", ("en",), timeout=0.2)
+
+        assert started.wait(1.0)
+        assert worker_finished.wait(1.0)
+        assert server_finished.wait(1.0)
+
+        class QuickService:
+            def fetch(self, _source, _languages):
+                return "recovered"
+
+        assert fetch_with_deadline(QuickService(), "video", ("en",), timeout=1.0) == (
+            "recovered"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1.0)
+
+
+def test_ytdlp_checks_deadline_between_network_requests(monkeypatch) -> None:
+    import threading
+    import time
+
+    import yt_dlp
+    from yt_dlp.networking.common import Request
+
+    requests_seen: list[Request] = []
+    worker_finished = threading.Event()
+
+    def fake_urlopen(_downloader, request):
+        requests_seen.append(request)
+        return object()
+
+    def fake_extract_info(downloader, _source_url, download=False):
+        downloader.urlopen(Request("https://example.test/first"))
+        time.sleep(0.3)
+        downloader.urlopen(Request("https://example.test/second"))
+        return {}
+
+    monkeypatch.setattr(yt_dlp.YoutubeDL, "urlopen", fake_urlopen)
+    monkeypatch.setattr(yt_dlp.YoutubeDL, "extract_info", fake_extract_info)
+    service = TranscriptService()
+
+    class ExtractingService:
+        def fetch(self, _source, _languages):
+            try:
+                return service._extract_video_info(
+                    "https://www.youtube.com/watch?v=abc"
+                )
+            finally:
+                worker_finished.set()
+
+    with pytest.raises(TranscriptTimeoutError, match="timed out"):
+        fetch_with_deadline(ExtractingService(), "video", ("en",), timeout=0.2)
+
+    assert worker_finished.wait(1.0)
+    assert len(requests_seen) == 1
+    assert 0 < requests_seen[0].extensions["timeout"] <= 0.2
+
+
+def test_timed_out_ytdlp_response_body_is_interrupted() -> None:
+    import socketserver
+    import threading
+
+    import youtube_study_tool.transcripts as transcripts_module
+
+    started = threading.Event()
+    server_finished = threading.Event()
+    stop_stream = threading.Event()
+
+    class SlowBodyHandler(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            try:
+                self.request.recv(4096)
+                self.request.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n"
+                    b"Connection: close\r\n\r\n"
+                )
+                started.set()
+                for _ in range(100_000):
+                    if stop_stream.wait(0.01):
+                        break
+                    self.request.sendall(b"x")
+            except OSError:
+                pass
+            finally:
+                server_finished.set()
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), SlowBodyHandler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    worker_finished = threading.Event()
+    url = f"http://127.0.0.1:{server.server_address[1]}/slow-body"
+
+    class YtDlpStreamingService:
+        def fetch(self, _source, _languages):
+            try:
+                with transcripts_module._DeadlineYoutubeDL(
+                    {"quiet": True, "no_warnings": True, "socket_timeout": 5}
+                ) as downloader:
+                    response = downloader.urlopen(url)
+                    started.set()
+                    return response.read()
+            finally:
+                worker_finished.set()
+
+    try:
+        with pytest.raises(TranscriptTimeoutError, match="timed out"):
+            fetch_with_deadline(YtDlpStreamingService(), "video", ("en",), timeout=0.5)
+
+        assert started.wait(1.0)
+        assert worker_finished.wait(1.0)
+        assert server_finished.wait(1.0)
+
+        class QuickService:
+            def fetch(self, _source, _languages):
+                return "recovered"
+
+        assert fetch_with_deadline(QuickService(), "video", ("en",), timeout=1.0) == (
+            "recovered"
+        )
+    finally:
+        stop_stream.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1.0)
+        worker_finished.wait(1.0)

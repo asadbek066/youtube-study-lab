@@ -313,6 +313,288 @@ def test_generate_falls_back_when_the_generation_deadline_is_exceeded(
     assert "time budget" in generator.last_fallback_reason
 
 
+def test_provider_result_returned_after_deadline_is_rejected(monkeypatch) -> None:
+    import youtube_study_tool.generation as generation_module
+    from youtube_study_tool.generation import ProviderCallBudget
+
+    generator = _ready_generator()
+    bundle = build_manual_transcript("A model learns from examples and feedback.")
+    clock = {"now": 100.0}
+    monkeypatch.setattr(generation_module, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        generation_module,
+        "PROVIDER_CALL_BUDGET",
+        ProviderCallBudget(max_calls=10, window_seconds=3600),
+    )
+    monkeypatch.setattr(
+        generator, "_classify", lambda _bundle: heuristic_classification(bundle)
+    )
+    monkeypatch.setattr(
+        generator, "_chunk_summaries", lambda *_args, **_kwargs: ["grounded excerpt"]
+    )
+
+    def late_provider_response(*_args, **_kwargs) -> str:
+        clock["now"] = 401.0
+        return _valid_llm_output()
+
+    monkeypatch.setattr(generator, "_complete_openai_family", late_provider_response)
+
+    analysis = generator.generate(bundle)
+
+    assert analysis.provider == "Heuristic fallback"
+    assert "time budget" in generator.last_fallback_reason
+
+
+def test_openai_request_timeout_uses_the_remaining_generation_budget(
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    import youtube_study_tool.generation as generation_module
+
+    captured: dict[str, object] = {}
+
+    class Responses:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(output_text="provider result")
+
+    generator = _ready_generator()
+    generator.client = SimpleNamespace(responses=Responses())
+    generator._deadline = 105.0
+    monkeypatch.setattr(generation_module, "monotonic", lambda: 101.25)
+
+    result = generator._complete_openai_family("prompt", "instructions", 100, 0.0)
+
+    assert result == "provider result"
+    assert captured["timeout"] == 3.75
+
+
+def test_gemini_request_timeout_uses_a_temporary_client(monkeypatch) -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    import youtube_study_tool.generation as generation_module
+
+    generator = _ready_generator()
+    settings = replace(
+        generator.settings,
+        requested_provider="gemini",
+        provider="gemini",
+        gemini_api_key="key",
+        gemini_model="gemini-2.5-flash",
+    )
+    generator.settings = settings
+    captured: dict[str, object] = {}
+    clients: list[object] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.models = SimpleNamespace(generate_content=self.generate_content)
+            clients.append(self)
+
+        def generate_content(self, **_kwargs):
+            captured["request_client"] = self
+            return SimpleNamespace(text="result")
+
+        def close(self) -> None:
+            captured["closed"] = True
+            captured["closed_client"] = self
+
+    class FakeGenai:
+        @staticmethod
+        def Client(**kwargs):
+            return FakeClient(**kwargs)
+
+    original_client = FakeClient()
+    generator.client = original_client
+    monkeypatch.setattr(generation_module, "genai", FakeGenai)
+    monkeypatch.setattr(generation_module, "monotonic", lambda: 198.75)
+    generator._deadline = 200.0
+
+    result = generator._complete_gemini("prompt", "instructions", 100, 0.0)
+
+    http_options = captured["http_options"]
+    assert http_options.timeout == 1_250
+    assert http_options.retry_options.attempts == 1
+    assert captured["closed"] is True
+    assert captured["request_client"] is clients[-1]
+    assert captured["request_client"] is not original_client
+    assert captured["closed_client"] is captured["request_client"]
+    assert result == "result"
+
+
+def test_timed_out_gemini_call_closes_its_temporary_client(monkeypatch) -> None:
+    import threading
+    import time
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    import youtube_study_tool.generation as generation_module
+
+    base = _ready_generator().settings
+    settings = replace(
+        base,
+        requested_provider="gemini",
+        provider="gemini",
+        gemini_api_key="key",
+        gemini_model="gemini-2.5-flash",
+    )
+    started = threading.Event()
+    clients = []
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            self.closed = threading.Event()
+            self.models = SimpleNamespace(generate_content=self.generate_content)
+            clients.append(self)
+
+        def generate_content(self, **_kwargs):
+            started.set()
+            if not self.closed.wait(2.0):
+                raise RuntimeError("fake request was never cancelled")
+            raise RuntimeError("fake request interrupted by client close")
+
+        def close(self) -> None:
+            self.closed.set()
+
+    class FakeGenai:
+        @staticmethod
+        def Client(**kwargs):
+            return FakeClient(**kwargs)
+
+    monkeypatch.setattr(generation_module, "genai", FakeGenai)
+    monkeypatch.setattr(
+        generation_module,
+        "PROVIDER_CALL_BUDGET",
+        generation_module.ProviderCallBudget(max_calls=10, window_seconds=3600),
+    )
+    generator = StudyPackGenerator(settings)
+    original_client = generator.client
+    generator._deadline = time.monotonic() + 0.2
+
+    with pytest.raises(GenerationLimitExceeded, match="time budget"):
+        generator._complete("prompt", "instructions", 100, 0.0)
+
+    assert started.wait(1.0)
+    assert len(clients) == 2
+    assert clients[0] is original_client
+    assert clients[1].closed.is_set()
+    assert generator.client is original_client
+    acquired = 0
+    try:
+        for _ in range(generation_module.MAX_CONCURRENT_PROVIDER_REQUESTS):
+            assert generation_module._PROVIDER_ADMISSION.acquire(timeout=1.0)
+            acquired += 1
+    finally:
+        for _ in range(acquired):
+            generation_module._PROVIDER_ADMISSION.release()
+
+
+def test_timed_out_openai_streaming_response_closes_the_active_client(
+    monkeypatch,
+) -> None:
+    import threading
+    from dataclasses import replace
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import youtube_study_tool.generation as generation_module
+
+    response_started = threading.Event()
+    server_finished = threading.Event()
+    stop_stream = threading.Event()
+
+    class SlowProviderHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            request_length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(request_length)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "100000")
+            self.end_headers()
+            response_started.set()
+            try:
+                for _ in range(100_000):
+                    if stop_stream.wait(0.01):
+                        break
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                server_finished.set()
+
+        def log_message(self, *_args) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowProviderHandler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    base = _ready_generator().settings
+    settings = replace(
+        base,
+        openai_base_url=f"http://127.0.0.1:{server.server_port}/v1",
+    )
+    generator = StudyPackGenerator(settings)
+    budget = generation_module.ProviderCallBudget(max_calls=10, window_seconds=3600)
+    monkeypatch.setattr(generation_module, "PROVIDER_CALL_BUDGET", budget)
+    monkeypatch.setattr(generation_module, "GENERATION_DEADLINE_SECONDS", 0.5)
+
+    try:
+        analysis = generator.generate(
+            build_manual_transcript("A model learns from examples and feedback.")
+        )
+
+        assert analysis.provider == "Heuristic fallback"
+        assert "time budget" in generator.last_fallback_reason
+        assert not generator.is_ready
+        second_analysis = generator.generate(
+            build_manual_transcript("A model learns from examples and feedback.")
+        )
+        assert second_analysis.provider == "Heuristic fallback"
+        assert "client was closed" in generator.last_fallback_reason
+        assert response_started.wait(1.0)
+        assert server_finished.wait(1.0)
+        acquired = 0
+        try:
+            for _ in range(generation_module.MAX_CONCURRENT_PROVIDER_REQUESTS):
+                assert generation_module._PROVIDER_ADMISSION.acquire(timeout=1.0)
+                acquired += 1
+        finally:
+            for _ in range(acquired):
+                generation_module._PROVIDER_ADMISSION.release()
+    finally:
+        stop_stream.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1.0)
+        server_finished.wait(1.0)
+
+
+def test_invalid_provider_output_uses_an_output_rejection_reason(monkeypatch) -> None:
+    generator = _ready_generator()
+    bundle = build_manual_transcript("A model learns from examples and feedback.")
+    monkeypatch.setattr(
+        generator, "_classify", lambda _bundle: heuristic_classification(bundle)
+    )
+    monkeypatch.setattr(
+        generator, "_chunk_summaries", lambda *_args, **_kwargs: ["grounded excerpt"]
+    )
+    monkeypatch.setattr(
+        generator, "_complete", lambda *_args, **_kwargs: "not a study pack"
+    )
+
+    analysis = generator.generate(bundle)
+
+    assert analysis.provider == "Heuristic fallback"
+    assert "output failed" in generator.last_fallback_reason
+    assert "request failed" not in generator.last_fallback_reason
+
+
 def test_generate_falls_back_when_the_server_budget_is_spent(monkeypatch) -> None:
     import youtube_study_tool.generation as generation_module
     from youtube_study_tool.generation import ProviderCallBudget
@@ -411,6 +693,51 @@ def test_provider_clients_disable_retries_and_bound_timeouts(monkeypatch) -> Non
     http_options = gemini_captured["http_options"]
     assert http_options.timeout == LLM_REQUEST_TIMEOUT_SECONDS * 1000
     assert http_options.retry_options.attempts == 1
+
+
+@pytest.mark.parametrize("provider", ["openai", "azure_openai"])
+def test_loopback_http_clients_ignore_environment_proxies_and_redirects(
+    monkeypatch, provider: str
+) -> None:
+    from dataclasses import replace
+
+    import httpx2
+
+    import youtube_study_tool.generation as generation_module
+
+    captured: dict[str, object] = {}
+
+    class FakeHttpClient:
+        def __init__(self, **kwargs):
+            captured["http_options"] = kwargs
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client_options"] = kwargs
+
+    monkeypatch.setattr(httpx2, "Client", FakeHttpClient)
+    monkeypatch.setattr(generation_module, "OpenAI", FakeOpenAI)
+    base = _ready_generator().settings
+    if provider == "openai":
+        settings = replace(base, openai_base_url="http://127.0.0.1:1234/v1")
+    else:
+        settings = replace(
+            base,
+            requested_provider="azure_openai",
+            provider="azure_openai",
+            azure_openai_api_key="local-key",
+            azure_openai_endpoint="http://[::1]:1234",
+            azure_openai_deployment="deployment",
+        )
+
+    generator = StudyPackGenerator(settings)
+
+    assert generator.is_ready
+    http_options = captured["http_options"]
+    client_options = captured["client_options"]
+    assert http_options["trust_env"] is False
+    assert http_options["follow_redirects"] is False
+    assert client_options["http_client"] is not None
 
 
 def test_multi_chunk_prompts_are_ordered_and_within_budget(monkeypatch) -> None:

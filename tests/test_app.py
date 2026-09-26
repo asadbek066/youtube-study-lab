@@ -103,7 +103,12 @@ def test_markdown_export_preserves_source_timestamp_links() -> None:
     assert "[00:00](https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=0s)" in exported
 
 
-def _paid_generation_recorder(monkeypatch, *, uses_provider: bool = True):
+def _paid_generation_recorder(
+    monkeypatch,
+    *,
+    uses_provider: bool = True,
+    fallback_reason: str = "the provider request failed",
+):
     from dataclasses import replace as dataclass_replace
 
     from youtube_study_tool.fallback import generate_fallback_bundle
@@ -122,7 +127,7 @@ def _paid_generation_recorder(monkeypatch, *, uses_provider: bool = True):
             self.last_fallback_reason = ""
             self._provider_calls = 3
             return dataclass_replace(analysis, provider="OpenAI")
-        self.last_fallback_reason = "the provider request failed"
+        self.last_fallback_reason = fallback_reason
         self._provider_calls = 0
         return analysis
 
@@ -198,6 +203,44 @@ def test_local_fallback_shows_a_degradation_notice(monkeypatch) -> None:
     app.run()
     warnings_after_rerun = " ".join(warning.value for warning in app.warning)
     assert "generated locally" in warnings_after_rerun
+
+
+def test_output_validation_fallback_is_not_reported_as_provider_unavailable(
+    monkeypatch,
+) -> None:
+    _paid_generation_recorder(
+        monkeypatch,
+        uses_provider=False,
+        fallback_reason="provider output failed the format or source checks",
+    )
+
+    app = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
+    _submit_manual_transcript(app)
+
+    warnings = " ".join(warning.value for warning in app.warning)
+    assert "instead of OpenAI" in warnings
+    assert "format or source checks" in warnings
+    assert "unavailable" not in warnings
+    assert not app.exception
+
+
+def test_timeout_closed_provider_client_still_shows_degradation_notice() -> None:
+    from types import SimpleNamespace
+
+    from app import degradation_notice
+
+    generator = SimpleNamespace(
+        is_ready=False,
+        provider_label="OpenAI",
+        last_fallback_reason="provider request exceeded its time budget; using local fallback",
+    )
+    analysis = SimpleNamespace(provider="Heuristic fallback")
+
+    notice = degradation_notice(generator, analysis)
+
+    assert notice is not None
+    assert "generated locally instead of OpenAI" in notice
+    assert "time budget" in notice
 
 
 def test_failed_provider_output_still_consumes_the_session_budget(
@@ -276,4 +319,26 @@ def test_transcript_timeout_surfaces_a_clear_error(monkeypatch) -> None:
 
     errors = " ".join(error.value for error in app.error)
     assert "timed out" in errors
+    assert not app.exception
+
+
+def test_transcript_fetch_saturation_surfaces_retry_guidance(monkeypatch) -> None:
+    from youtube_study_tool.transcripts import TranscriptBusyError
+
+    def busy(*_args, **_kwargs):
+        raise TranscriptBusyError(
+            "Transcript retrieval is busy. Please try again later."
+        )
+
+    monkeypatch.setattr("youtube_study_tool.transcripts.fetch_with_deadline", busy)
+
+    app = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
+    app.text_input[0].input("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    next(
+        button for button in app.button if button.label == "Build study pack"
+    ).click().run()
+
+    info = " ".join(message.value for message in app.info)
+    assert "busy" in info
+    assert "try again later" in info
     assert not app.exception

@@ -47,6 +47,9 @@ jobs:
       - name: Check installed dependencies
         run: python -m pip check
 
+      - name: Check hash-pinned lock files
+        run: python tools/check_requirement_locks.py
+
       - name: Run lint
         run: python -m ruff check app.py youtube_study_tool tests
 

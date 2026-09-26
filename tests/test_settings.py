@@ -1,3 +1,5 @@
+import pytest
+
 from youtube_study_tool.settings import load_settings
 
 
@@ -77,7 +79,9 @@ def test_invalid_openai_base_url_is_reported_as_a_config_error(monkeypatch) -> N
         openai_base_url="ftp://not-http.example",
     )
 
-    assert settings.config_error == "OPENAI_BASE_URL must be a valid http(s) URL."
+    assert settings.config_error == (
+        "OPENAI_BASE_URL must use HTTPS; HTTP is allowed only for loopback hosts."
+    )
     assert not settings.is_ready
 
 
@@ -109,7 +113,9 @@ def test_invalid_azure_endpoint_is_reported_as_a_config_error() -> None:
         azure_openai_deployment="deployment",
     )
 
-    assert settings.config_error == "AZURE_OPENAI_ENDPOINT must be a valid http(s) URL."
+    assert settings.config_error == (
+        "AZURE_OPENAI_ENDPOINT must use HTTPS; HTTP is allowed only for loopback hosts."
+    )
     assert not settings.is_ready
 
 
@@ -125,7 +131,9 @@ def test_control_characters_in_url_are_rejected() -> None:
         openai_base_url="https://gateway.example/v1\nheader",
     )
 
-    assert settings.config_error == "OPENAI_BASE_URL must be a valid http(s) URL."
+    assert settings.config_error == (
+        "OPENAI_BASE_URL must use HTTPS; HTTP is allowed only for loopback hosts."
+    )
 
 
 def test_provider_specific_url_validation_ignores_inactive_providers() -> None:
@@ -156,4 +164,93 @@ def test_invalid_port_is_reported_as_a_config_error() -> None:
         openai_base_url="https://gateway.example:abc/v1",
     )
 
-    assert settings.config_error == "OPENAI_BASE_URL must be a valid http(s) URL."
+    assert settings.config_error == (
+        "OPENAI_BASE_URL must use HTTPS; HTTP is allowed only for loopback hosts."
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://provider.example/v1",
+        "http://10.0.0.5/v1",
+        "http://localhost.attacker.example/v1",
+        "https://user:password@provider.example/v1",
+    ],
+)
+def test_openai_endpoint_rejects_plaintext_remote_or_userinfo_urls(
+    url: str,
+) -> None:
+    from dataclasses import replace
+
+    settings = replace(
+        load_settings(),
+        requested_provider="openai",
+        provider="openai",
+        openai_api_key="key",
+        openai_model="gpt-4o-mini",
+        openai_base_url=url,
+    )
+
+    assert not settings.is_ready
+    assert settings.config_error == (
+        "OPENAI_BASE_URL must use HTTPS; HTTP is allowed only for loopback hosts."
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:11434/v1",
+        "http://127.0.0.1:1234/v1",
+        "http://[::1]:1234/v1",
+    ],
+)
+def test_openai_endpoint_allows_http_for_loopback_development(
+    url: str,
+) -> None:
+    from dataclasses import replace
+
+    settings = replace(
+        load_settings(),
+        requested_provider="openai",
+        provider="openai",
+        openai_api_key="local-key",
+        openai_model="local-model",
+        openai_base_url=url,
+    )
+
+    assert settings.is_ready
+
+
+def test_azure_endpoint_rejects_plaintext_remote_urls() -> None:
+    from dataclasses import replace
+
+    settings = replace(
+        load_settings(),
+        requested_provider="azure_openai",
+        provider="azure_openai",
+        azure_openai_api_key="key",
+        azure_openai_endpoint="http://example-resource.openai.azure.com",
+        azure_openai_deployment="deployment",
+    )
+
+    assert not settings.is_ready
+    assert settings.config_error == (
+        "AZURE_OPENAI_ENDPOINT must use HTTPS; HTTP is allowed only for loopback hosts."
+    )
+
+
+def test_azure_endpoint_allows_http_loopback_for_local_development() -> None:
+    from dataclasses import replace
+
+    settings = replace(
+        load_settings(),
+        requested_provider="azure_openai",
+        provider="azure_openai",
+        azure_openai_api_key="local-key",
+        azure_openai_endpoint="http://127.0.0.1:1234",
+        azure_openai_deployment="deployment",
+    )
+
+    assert settings.is_ready
