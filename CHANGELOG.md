@@ -38,3 +38,5 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 - Transcript fetches now fail fast with a "service busy" message when all
   workers are still occupied by abandoned requests, and yt-dlp extraction uses
   tighter timeouts and retry limits.
+- Provider failures are logged as type, status, and a key-redacted message
+  instead of a full traceback.
