@@ -6,8 +6,11 @@ import requests
 
 from youtube_study_tool.models import MAX_TRANSCRIPT_CHARS, TranscriptSegment
 from youtube_study_tool.transcripts import (
+    _FETCH_SLOTS,
     MAX_CAPTION_PAYLOAD_BYTES,
+    MAX_FETCH_WORKERS,
     MAX_WATCH_PAYLOAD_BYTES,
+    TranscriptBusyError,
     TranscriptRetrievalError,
     TranscriptService,
     TranscriptTimeoutError,
@@ -1111,3 +1114,104 @@ def test_redirect_to_allowed_host_is_followed_and_capped(monkeypatch) -> None:
         TranscriptService()._download_caption_segments(
             "https://www.youtube.com/api/timedtext"
         )
+
+
+def _wait_for_free_slots(expected: int) -> None:
+    import time as time_module
+
+    deadline = time_module.monotonic() + 3
+    while time_module.monotonic() < deadline:
+        if _FETCH_SLOTS._value == expected:
+            return
+        time_module.sleep(0.005)
+    raise AssertionError("fetch slots were not released")
+
+
+class _BlockingService:
+    def __init__(self) -> None:
+        import threading
+
+        self.release = threading.Event()
+
+    def fetch(self, source, languages):
+        self.release.wait(5)
+        return "done"
+
+
+def test_saturated_fetch_pool_fails_fast_and_recovers() -> None:
+    import time as time_module
+
+    _wait_for_free_slots(MAX_FETCH_WORKERS)
+    stuck = _BlockingService()
+    try:
+        for _ in range(MAX_FETCH_WORKERS):
+            with pytest.raises(TranscriptTimeoutError):
+                fetch_with_deadline(stuck, "video", ("en",), timeout=0.01)
+
+        class Quick:
+            called = False
+
+            def fetch(self, source, languages):
+                Quick.called = True
+                return "bundle"
+
+        started = time_module.monotonic()
+        with pytest.raises(TranscriptBusyError, match="busy"):
+            fetch_with_deadline(Quick(), "video", ("en",), timeout=5)
+        assert time_module.monotonic() - started < 0.5
+        assert Quick.called is False
+    finally:
+        stuck.release.set()
+
+    # Slots come back when the abandoned work finally ends.
+    _wait_for_free_slots(MAX_FETCH_WORKERS)
+    assert fetch_with_deadline(_ready_service(), "v", ("en",), timeout=1)
+
+
+def _ready_service():
+    service = _BlockingService()
+    service.release.set()
+    return service
+
+
+def test_normal_fetch_releases_its_slot() -> None:
+    _wait_for_free_slots(MAX_FETCH_WORKERS)
+    assert fetch_with_deadline(_ready_service(), "v", ("en",)) == "done"
+    _wait_for_free_slots(MAX_FETCH_WORKERS)
+
+
+def test_failed_fetch_releases_its_slot() -> None:
+    class Boom:
+        def fetch(self, source, languages):
+            raise TranscriptRetrievalError("nope")
+
+    _wait_for_free_slots(MAX_FETCH_WORKERS)
+    with pytest.raises(TranscriptRetrievalError, match="nope"):
+        fetch_with_deadline(Boom(), "v", ("en",))
+    _wait_for_free_slots(MAX_FETCH_WORKERS)
+
+
+def test_ytdlp_options_bound_an_abandoned_extraction(monkeypatch) -> None:
+    seen: dict = {}
+
+    class FakeYDL:
+        def __init__(self, options):
+            seen.update(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, url, download):
+            return {}
+
+    monkeypatch.setattr("youtube_study_tool.transcripts.yt_dlp.YoutubeDL", FakeYDL)
+    TranscriptService()._extract_video_info("https://www.youtube.com/watch?v=x")
+    assert seen["skip_download"] is True
+    assert seen["noplaylist"] is True
+    assert seen["socket_timeout"] <= 10
+    assert seen["retries"] <= 1
+    assert seen["extractor_retries"] <= 1
+    assert seen["fragment_retries"] == 0

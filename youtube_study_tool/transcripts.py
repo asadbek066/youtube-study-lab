@@ -5,6 +5,7 @@ import logging
 import math
 import random
 import re
+import threading
 import time
 from collections.abc import Iterable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -50,9 +51,13 @@ logger = logging.getLogger(__name__)
 # A long-lived executor lets the caller abandon a slow fetch after the
 # wall-clock budget without joining it at the call site (a `with
 # ThreadPoolExecutor` would block on shutdown).
+MAX_FETCH_WORKERS = 4
 _FETCH_EXECUTOR = ThreadPoolExecutor(
-    max_workers=4, thread_name_prefix="transcript-fetch"
+    max_workers=MAX_FETCH_WORKERS, thread_name_prefix="transcript-fetch"
 )
+# One slot per worker, released when the work actually ends (not when the
+# caller gives up), so a free slot always means a free worker.
+_FETCH_SLOTS = threading.BoundedSemaphore(MAX_FETCH_WORKERS)
 
 
 class TranscriptRetrievalError(Exception):
@@ -87,6 +92,10 @@ def validate_fetch_url(url: str) -> str:
     if host not in ALLOWED_FETCH_HOSTS:
         raise rejected
     return url
+
+
+class TranscriptBusyError(TranscriptRetrievalError):
+    """Raised when every transcript worker is still busy with earlier fetches."""
 
 
 def _payload_limit(url: str) -> int:
@@ -386,7 +395,19 @@ class TranscriptService:
             "quiet": True,
             "no_warnings": True,
             "extract_flat": False,
-            "socket_timeout": 20,
+            "noplaylist": True,
+            "playlist_items": "1",
+            # yt-dlp has no total wall-clock option, so an abandoned call is
+            # bounded per operation instead: every network request times out
+            # after 10 s and is retried at most once (<= ~20 s per request),
+            # with no download/fragment/file retries. A single-video YouTube
+            # extraction issues a small, finite number of requests, so the
+            # call ends on its own in minutes at worst rather than hanging.
+            "socket_timeout": 10,
+            "retries": 1,
+            "extractor_retries": 1,
+            "fragment_retries": 0,
+            "file_access_retries": 0,
         }
         with yt_dlp.YoutubeDL(options) as downloader:
             return downloader.extract_info(source_url, download=False)
@@ -843,10 +864,24 @@ def fetch_with_deadline(
 ) -> TranscriptBundle:
     """Run transcript retrieval under a wall-clock bound.
 
-    The worker thread cannot be cancelled, but per-request timeouts bound how
-    long it can outlive the abandoned call.
+    The worker thread cannot be cancelled, so a timed-out fetch keeps its slot
+    until it really ends (bounded by per-request timeouts). When every slot is
+    taken the call fails fast instead of queueing, so the deadline measures
+    work, not time spent waiting behind stuck fetches.
     """
-    future: Future = _FETCH_EXECUTOR.submit(service.fetch, source, preferred_languages)
+    if not _FETCH_SLOTS.acquire(blocking=False):
+        raise TranscriptBusyError(
+            "The transcript service is busy with other requests. "
+            "Please try again in a minute, or paste the transcript instead."
+        )
+    try:
+        future: Future = _FETCH_EXECUTOR.submit(
+            service.fetch, source, preferred_languages
+        )
+    except BaseException:
+        _FETCH_SLOTS.release()
+        raise
+    future.add_done_callback(lambda _future: _FETCH_SLOTS.release())
     try:
         return future.result(timeout=timeout)
     except TimeoutError as error:
