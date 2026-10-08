@@ -440,3 +440,52 @@ def test_multi_chunk_prompts_are_ordered_and_within_budget(monkeypatch) -> None:
         assert f"Chunk {index} of {len(chunk_prompts)}" in prompt
     # one final synthesis call around the chunks (classification is stubbed)
     assert len(calls) == len(chunk_prompts) + 1
+
+
+class _KeyLeakingError(Exception):
+    status_code = 401
+
+
+def test_provider_errors_are_logged_without_keys_or_tracebacks(
+    monkeypatch, caplog
+) -> None:
+    generator = _ready_generator()
+    bundle = build_manual_transcript("A model learns from examples and feedback.")
+    leaks = (
+        "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+        "AIzaSyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q",
+        "test-key",
+        "Bearer abcdefgh12345678",
+        "api_key=ZZtopSecret99",
+    )
+
+    def boom(_bundle):
+        raise _KeyLeakingError("Incorrect API key provided: " + " | ".join(leaks))
+
+    monkeypatch.setattr(generator, "_generate_with_llm", boom)
+    with caplog.at_level("DEBUG", logger="youtube_study_tool.generation"):
+        analysis = generator.generate(bundle)
+
+    assert analysis.provider == "Heuristic fallback"
+    text = caplog.text
+    for leak in leaks:
+        assert leak not in text
+    assert "ZZtopSecret99" not in text
+    assert "_KeyLeakingError" in text
+    assert "status 401" in text
+    assert "openai" in text and "gpt-4o-mini" in text
+    assert "Traceback" not in text
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_client_init_errors_do_not_log_keys(monkeypatch, caplog) -> None:
+    def explode(**kwargs):
+        raise ValueError(f"bad config for key {kwargs['api_key']}")
+
+    monkeypatch.setattr("youtube_study_tool.generation.OpenAI", explode)
+    with caplog.at_level("DEBUG", logger="youtube_study_tool.generation"):
+        generator = _ready_generator()
+
+    assert generator.client is None
+    assert "test-key" not in caplog.text
+    assert "Traceback" not in caplog.text

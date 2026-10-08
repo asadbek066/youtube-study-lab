@@ -48,7 +48,38 @@ DEFAULT_MAX_PROVIDER_CALLS_PER_HOUR = 120
 MARKDOWN_LINK_RE = re.compile(r"!?\[(?:[^\]]*)\]\(([^)]*)\)", re.DOTALL)
 REFERENCE_LINK_RE = re.compile(r"\[[^]]+\]\[[^]]*\]", re.DOTALL)
 BARE_URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+SECRET_RE = re.compile(
+    r"sk-[A-Za-z0-9_-]{8,}"  # OpenAI-style keys, including sk-proj-...
+    r"|AIza[0-9A-Za-z_-]{20,}"  # Google API keys
+    r"|(?i:bearer)\s+[A-Za-z0-9._~+/=-]{8,}"
+    r"|(?i:(?:api[_-]?key|key|token|secret|authorization)[\"']?\s*[:=]\s*[\"']?)"
+    r"[A-Za-z0-9._~+/=-]{8,}"
+    r"|\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}\b"
+)
+MAX_LOGGED_ERROR_CHARS = 300
 logger = logging.getLogger(__name__)
+
+
+def redact_secrets(text: str, known_secrets: tuple[str, ...] = ()) -> str:
+    """Mask anything that looks like an API key or token in ``text``."""
+    for secret in known_secrets:
+        if secret and len(secret) >= 4:
+            text = text.replace(secret, "[redacted]")
+    return SECRET_RE.sub("[redacted]", text)
+
+
+def describe_provider_error(
+    error: BaseException, known_secrets: tuple[str, ...] = ()
+) -> str:
+    """Summarise a provider failure without a traceback or key material."""
+    status = getattr(error, "status_code", None) or getattr(error, "code", None)
+    message = redact_secrets(" ".join(str(error).split()), known_secrets)
+    if len(message) > MAX_LOGGED_ERROR_CHARS:
+        message = message[:MAX_LOGGED_ERROR_CHARS] + "..."
+    detail = f"{type(error).__name__}"
+    if isinstance(status, int):
+        detail += f" (status {status})"
+    return f"{detail}: {message}" if message else detail
 
 
 class ProviderCallBudget:
@@ -177,13 +208,29 @@ class StudyPackGenerator:
                 logger.warning("LLM generation skipped: %s", error)
                 self.last_fallback_reason = str(error) or "provider budget reached"
                 return generate_fallback_bundle(bundle)
-            except Exception:
-                logger.exception("LLM generation failed, using fallback bundle.")
+            except Exception as error:  # noqa: BLE001 - any provider failure degrades to the fallback.
+                logger.error(
+                    "LLM generation failed for %s (%s), using fallback bundle: %s",
+                    self.settings.provider,
+                    self.settings.active_model,
+                    describe_provider_error(error, self._secret_values()),
+                )
                 self.last_fallback_reason = "the provider request failed"
                 return generate_fallback_bundle(bundle)
         if self.client is None and self.client_error:
             self.last_fallback_reason = self.client_error
         return generate_fallback_bundle(bundle)
+
+    def _secret_values(self) -> tuple[str, ...]:
+        return tuple(
+            value
+            for value in (
+                self.settings.openai_api_key,
+                self.settings.azure_openai_api_key,
+                self.settings.gemini_api_key,
+            )
+            if value
+        )
 
     def _build_client(self) -> Any | None:
         if not self.settings.is_ready:
@@ -216,11 +263,13 @@ class StudyPackGenerator:
                         retry_options=genai_types.HttpRetryOptions(attempts=1),
                     ),
                 )
-        except Exception:
+        except Exception as error:  # noqa: BLE001 - SDK construction errors are unpredictable.
             # A malformed endpoint or SDK configuration must degrade to the
             # local generator instead of crashing every Streamlit rerun.
-            logger.exception(
-                "Could not initialize the %s client.", self.settings.provider
+            logger.error(
+                "Could not initialize the %s client: %s",
+                self.settings.provider,
+                describe_provider_error(error, self._secret_values()),
             )
             self.client_error = "the provider client could not be initialized"
             return None
