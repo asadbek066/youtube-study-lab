@@ -16,6 +16,7 @@ from youtube_study_tool.transcripts import (
     extract_video_id,
     fetch_with_deadline,
     normalize_languages,
+    validate_fetch_url,
 )
 
 
@@ -163,7 +164,9 @@ def test_download_caption_segments_parses_json3_payload(monkeypatch) -> None:
     )
 
     service = TranscriptService()
-    segments = service._download_caption_segments("https://example.com/captions.json3")
+    segments = service._download_caption_segments(
+        "https://www.youtube.com/api/timedtext?fmt=json3"
+    )
 
     assert len(segments) == 2
     assert segments[0].text == "Hello world"
@@ -184,7 +187,7 @@ def test_download_caption_segments_rejects_oversized_payload(monkeypatch) -> Non
     )
     try:
         TranscriptService()._download_caption_segments(
-            "https://example.com/captions.vtt"
+            "https://www.youtube.com/api/timedtext?fmt=vtt"
         )
     except TranscriptRetrievalError as error:
         assert "too large" in str(error)
@@ -212,7 +215,7 @@ def test_download_caption_segments_stops_streaming_at_the_payload_limit(
     )
     try:
         TranscriptService()._download_caption_segments(
-            "https://example.com/captions.vtt"
+            "https://www.youtube.com/api/timedtext?fmt=vtt"
         )
     except TranscriptRetrievalError as error:
         assert "too large" in str(error)
@@ -228,7 +231,7 @@ def test_normalization_rejects_an_infinite_caption_endpoint() -> None:
 
 
 def test_caption_network_errors_do_not_echo_signed_urls(monkeypatch) -> None:
-    signed_url = "https://caption.example/track?sig=secret-value"
+    signed_url = "https://www.youtube.com/api/timedtext?sig=secret-value"
 
     def fail(*args, **kwargs):
         raise requests.RequestException(signed_url)
@@ -262,7 +265,7 @@ Next line
     )
 
     segments = TranscriptService()._download_caption_segments(
-        "https://example.com/captions.vtt", track_ext="vtt"
+        "https://www.youtube.com/api/timedtext?fmt=vtt", track_ext="vtt"
     )
 
     assert [
@@ -293,7 +296,7 @@ Valid cue
     )
 
     segments = TranscriptService()._download_caption_segments(
-        "https://example.com/captions.vtt", track_ext="vtt"
+        "https://www.youtube.com/api/timedtext?fmt=vtt", track_ext="vtt"
     )
 
     assert [segment.text for segment in segments] == ["Valid cue"]
@@ -326,7 +329,10 @@ def test_caption_retries_close_http_error_responses(monkeypatch) -> None:
 
     with pytest.raises(TranscriptRetrievalError, match="after 2 attempts"):
         TranscriptService()._get_response_with_retries(
-            "https://example.com/captions.vtt", timeout=1, retries=2, stream=True
+            "https://www.youtube.com/api/timedtext?fmt=vtt",
+            timeout=1,
+            retries=2,
+            stream=True,
         )
 
     assert [response.closed for response in responses] == [True, True]
@@ -353,7 +359,7 @@ def test_get_json_with_retries_closes_successful_response(monkeypatch) -> None:
     )
 
     payload = TranscriptService()._get_json_with_retries(
-        "https://example.com/captions.json", timeout=1
+        "https://www.youtube.com/api/timedtext?fmt=json", timeout=1
     )
 
     assert payload == {"status": "ok"}
@@ -380,7 +386,7 @@ Next line
     )
 
     segments = TranscriptService()._download_caption_segments(
-        "https://example.com/captions.srt", track_ext="srt"
+        "https://www.youtube.com/api/timedtext?fmt=srt", track_ext="srt"
     )
 
     assert [segment.text for segment in segments] == ["Hello world", "Next line"]
@@ -422,7 +428,7 @@ again
     )
 
     segments = TranscriptService()._download_caption_segments(
-        "https://example.com/captions.srt", track_ext="srt"
+        "https://www.youtube.com/api/timedtext?fmt=srt", track_ext="srt"
     )
 
     assert [(segment.text, segment.start) for segment in segments] == [
@@ -498,6 +504,7 @@ def test_fetch_video_title_passes_source_url_to_oembed(monkeypatch) -> None:
             {
                 "params": {"url": source_url, "format": "json"},
                 "timeout": 10,
+                "allow_redirects": False,
                 "stream": True,
             },
         )
@@ -538,7 +545,7 @@ def test_download_caption_segments_parses_srv_xml(monkeypatch) -> None:
     )
 
     segments = TranscriptService()._download_caption_segments(
-        "https://example.com/captions.srv3", track_ext="srv3"
+        "https://www.youtube.com/api/timedtext?fmt=srv3", track_ext="srv3"
     )
 
     assert [segment.text for segment in segments] == ["Hello & welcome", "Next"]
@@ -561,7 +568,7 @@ def test_download_caption_segments_parses_ttml_xml(monkeypatch) -> None:
     )
 
     segments = TranscriptService()._download_caption_segments(
-        "https://example.com/captions.ttml", track_ext="ttml"
+        "https://www.youtube.com/api/timedtext?fmt=ttml", track_ext="ttml"
     )
 
     assert [segment.text for segment in segments] == ["First", "Second"]
@@ -644,7 +651,7 @@ def test_caption_client_errors_are_not_retried(monkeypatch) -> None:
 
     with pytest.raises(TranscriptRetrievalError, match="HTTP 404"):
         TranscriptService()._get_response_with_retries(
-            "https://example.com/captions.vtt", timeout=1
+            "https://www.youtube.com/api/timedtext?fmt=vtt", timeout=1
         )
 
     assert len(calls) == 1
@@ -675,7 +682,7 @@ def test_caption_rate_limit_responses_are_still_retried(monkeypatch) -> None:
 
     with pytest.raises(TranscriptRetrievalError, match="HTTP 429"):
         TranscriptService()._get_response_with_retries(
-            "https://example.com/captions.vtt", timeout=1
+            "https://www.youtube.com/api/timedtext?fmt=vtt", timeout=1
         )
 
     assert len(calls) == 3
@@ -706,7 +713,7 @@ def test_caption_retry_backoff_is_jittered_and_bounded(monkeypatch) -> None:
 
     with pytest.raises(TranscriptRetrievalError, match="HTTP 503"):
         TranscriptService()._get_response_with_retries(
-            "https://example.com/captions.vtt", timeout=1
+            "https://www.youtube.com/api/timedtext?fmt=vtt", timeout=1
         )
 
     assert 0.5 <= sleeps[0] <= 0.75
@@ -976,3 +983,131 @@ def test_fetch_with_deadline_raises_a_timeout_error() -> None:
 
     with pytest.raises(TranscriptTimeoutError, match="timed out"):
         fetch_with_deadline(SlowService(), "video", ("en",), timeout=0.01)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en",
+        "https://youtube.com/api/timedtext",
+        "https://www.youtube.com:443/api/timedtext",
+    ],
+)
+def test_validate_fetch_url_accepts_youtube_hosts(url: str) -> None:
+    assert validate_fetch_url(url) == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://www.youtube.com/api/timedtext",
+        "ftp://www.youtube.com/x",
+        "file:///etc/passwd",
+        "//www.youtube.com/x",
+        "https://youtube.com.evil.test/x",
+        "https://evil-youtube.com/x",
+        "https://notyoutube.com/x",
+        "https://www.youtube.com.evil.test/x",
+        "https://evil.test/www.youtube.com",
+        "https://www.youtube.com./x",
+        "https://WWW.YouTube.com/x",
+        "https://www.youtube.com:8443/x",
+        "https://www.youtube.com:80/x",
+        "https://www.youtube.com:bad/x",
+        "https://user@www.youtube.com/x",
+        "https://user:pw@www.youtube.com/x",
+        "https://www.youtube.com@evil.test/x",
+        "https://evil.test\\@www.youtube.com/x",
+        "https://evil.test#@www.youtube.com/x",
+        "https://127.0.0.1/x",
+        "https://[::1]/x",
+        "https://169.254.169.254/latest/meta-data",
+        "https://2130706433/x",
+        "https://xn--yutube-n2a.com/x",
+        "https://www.youtubе.com/x",  # Cyrillic e
+        "https://www.youtube.com\n.evil.test/x",
+        "https://r1.googlevideo.com/x",
+        "https://localhost/x",
+        "",
+    ],
+)
+def test_validate_fetch_url_rejects_unsafe_urls(url: str) -> None:
+    with pytest.raises(TranscriptRetrievalError):
+        validate_fetch_url(url)
+
+
+def test_disallowed_caption_url_is_not_fetched(monkeypatch) -> None:
+    def fail(*args, **kwargs):
+        raise AssertionError("requests.get must not be called")
+
+    monkeypatch.setattr("youtube_study_tool.transcripts.requests.get", fail)
+    with pytest.raises(TranscriptRetrievalError):
+        TranscriptService()._download_caption_segments("http://169.254.169.254/x")
+
+
+class _Redirect:
+    def __init__(self, status: int, location: str | None) -> None:
+        self.status_code = status
+        self.headers = {"Location": location} if location else {}
+        self.closed = False
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_redirect_to_disallowed_host_is_not_followed(monkeypatch) -> None:
+    calls: list[str] = []
+    hop = _Redirect(302, "http://169.254.169.254/latest/meta-data")
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        assert kwargs["allow_redirects"] is False
+        return hop
+
+    monkeypatch.setattr("youtube_study_tool.transcripts.requests.get", fake_get)
+    with pytest.raises(TranscriptRetrievalError, match="allowed"):
+        TranscriptService()._download_caption_segments(
+            "https://www.youtube.com/api/timedtext"
+        )
+    assert calls == ["https://www.youtube.com/api/timedtext"]
+    assert hop.closed
+
+
+def test_redirect_to_allowed_host_is_followed_and_capped(monkeypatch) -> None:
+    class Ok:
+        status_code = 200
+        headers: ClassVar[dict[str, str]] = {}
+        text = "WEBVTT\n\n00:00.000 --> 00:01.000\nhi\n"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    calls: list[str] = []
+
+    def one_hop(url, **kwargs):
+        calls.append(url)
+        if url.startswith("https://www."):
+            return _Redirect(301, "https://youtube.com/api/timedtext?b=1")
+        return Ok()
+
+    monkeypatch.setattr("youtube_study_tool.transcripts.requests.get", one_hop)
+    segments = TranscriptService()._download_caption_segments(
+        "https://www.youtube.com/api/timedtext", track_ext="vtt"
+    )
+    assert segments[0].text == "hi"
+    assert calls[-1] == "https://youtube.com/api/timedtext?b=1"
+
+    def loop(url, **kwargs):
+        return _Redirect(302, "/api/timedtext")
+
+    monkeypatch.setattr("youtube_study_tool.transcripts.requests.get", loop)
+    with pytest.raises(TranscriptRetrievalError, match="redirected"):
+        TranscriptService()._download_caption_segments(
+            "https://www.youtube.com/api/timedtext"
+        )
