@@ -35,3 +35,6 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 - Caption and oEmbed downloads now require an https `youtube.com` host, reject
   userinfo and unusual ports, and follow redirects manually (max 3) with the same
   check on every hop.
+- Transcript fetches now fail fast with a "service busy" message when all
+  workers are still occupied by abandoned requests, and yt-dlp extraction uses
+  tighter timeouts and retry limits.

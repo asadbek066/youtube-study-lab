@@ -17,6 +17,7 @@ from youtube_study_tool.models import (
     TranscriptBundle,
 )
 from youtube_study_tool.transcripts import (
+    TranscriptBusyError,
     TranscriptRetrievalError,
     TranscriptService,
     TranscriptTimeoutError,
@@ -492,7 +493,7 @@ def run() -> None:
                 )
             with st.spinner("Building summary, notes, and quiz..."):
                 analysis = generate_study_pack(generator, transcript)
-        except TranscriptTimeoutError as error:
+        except (TranscriptTimeoutError, TranscriptBusyError) as error:
             st.error(str(error))
             return
         except (ValueError, TranscriptRetrievalError) as error:
