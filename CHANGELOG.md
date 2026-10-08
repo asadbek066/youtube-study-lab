@@ -32,3 +32,6 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 - Updated `yt-dlp`, `google-genai`, `ruff`, and `pytest` to versions without the
   known advisories reported by `pip-audit`.
 - Corrected the MIT license holder name.
+- Caption and oEmbed downloads now require an https `youtube.com` host, reject
+  userinfo and unusual ports, and follow redirects manually (max 3) with the same
+  check on every hop.

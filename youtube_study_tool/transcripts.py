@@ -9,7 +9,7 @@ import time
 from collections.abc import Iterable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from html import unescape
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse, urlsplit
 
 import requests
 import yt_dlp
@@ -36,6 +36,15 @@ MAX_CAPTION_PAYLOAD_BYTES = 2_000_000
 MAX_WATCH_PAYLOAD_BYTES = 8_000_000
 TRANSCRIPT_FETCH_DEADLINE_SECONDS = 90.0
 MAX_RETRY_DELAY_SECONDS = 5.0
+MAX_REDIRECTS = 3
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+# Hosts a caption/metadata fetch may contact. Evidence: yt-dlp builds caption
+# track URLs from the player response `baseUrl`, and every `baseUrl` in the
+# youtube-transcript-api fixtures is https://www.youtube.com/api/timedtext; the
+# oEmbed lookup uses https://www.youtube.com/oembed. `youtube.com` is the apex
+# that www redirects from. Matching is exact (no suffix wildcards) to stay
+# minimal; add a host here only with evidence of a real caption URL on it.
+ALLOWED_FETCH_HOSTS = frozenset({"www.youtube.com", "youtube.com"})
 logger = logging.getLogger(__name__)
 
 # A long-lived executor lets the caller abandon a slow fetch after the
@@ -52,6 +61,32 @@ class TranscriptRetrievalError(Exception):
 
 class TranscriptTimeoutError(TranscriptRetrievalError):
     """Raised when transcript retrieval exceeds its wall-clock budget."""
+
+
+def validate_fetch_url(url: str) -> str:
+    """Return ``url`` if it is a safe https YouTube URL, else raise.
+
+    Rejects non-https schemes, userinfo, explicit non-443 ports, hosts outside
+    ``ALLOWED_FETCH_HOSTS`` (this also rules out IP literals, trailing dots,
+    mixed case, punycode/IDNA lookalikes and suffix tricks), and control or
+    whitespace characters.
+    """
+    rejected = TranscriptRetrievalError("Caption URL is not an allowed YouTube host.")
+    if not isinstance(url, str) or any(
+        ch.isspace() or ord(ch) < 0x20 or ch == "\\" for ch in url
+    ):
+        raise rejected
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError as error:
+        raise rejected from error
+    if parts.scheme != "https" or "@" in parts.netloc or port not in {None, 443}:
+        raise rejected
+    host = parts.netloc.rsplit(":", 1)[0] if port is not None else parts.netloc
+    if host not in ALLOWED_FETCH_HOSTS:
+        raise rejected
+    return url
 
 
 def _payload_limit(url: str) -> int:
@@ -720,6 +755,36 @@ class TranscriptService:
             )
         return payload
 
+    @staticmethod
+    def _get_following_safe_redirects(
+        url: str,
+        *,
+        params: Mapping[str, str] | None,
+        timeout: float,
+        stream: bool,
+    ) -> requests.Response:
+        """GET with redirects followed by hand, validating every hop."""
+        current = url
+        for hop in range(MAX_REDIRECTS + 1):
+            response = requests.get(
+                current,
+                params=params if hop == 0 else None,
+                timeout=timeout,
+                stream=stream,
+                allow_redirects=False,
+            )
+            status = getattr(response, "status_code", None)
+            if status not in REDIRECT_STATUSES:
+                return response
+            location = (getattr(response, "headers", {}) or {}).get("Location")
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+            if not location or hop == MAX_REDIRECTS:
+                raise TranscriptRetrievalError("Caption download redirected too often.")
+            current = validate_fetch_url(urljoin(current, location))
+        raise AssertionError("unreachable")  # pragma: no cover
+
     def _get_response_with_retries(
         self,
         url: str,
@@ -729,11 +794,12 @@ class TranscriptService:
         stream: bool = False,
         params: Mapping[str, str] | None = None,
     ) -> requests.Response:
+        validate_fetch_url(url)
         last_error: str | None = None
         for attempt in range(max(1, retries)):
             response: requests.Response | None = None
             try:
-                response = requests.get(
+                response = self._get_following_safe_redirects(
                     url, params=params, timeout=timeout, stream=stream
                 )
                 response.raise_for_status()
