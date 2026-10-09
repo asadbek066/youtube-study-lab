@@ -40,3 +40,8 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
   tighter timeouts and retry limits.
 - Provider failures are logged as type, status, and a key-redacted message
   instead of a full traceback.
+- The transcript service and study-pack generator are now created once per
+  process and configuration (`st.cache_resource`, keyed on a salted digest of
+  all settings so API keys never enter the cache key) instead of on every
+  rerun; evicted entries close their HTTP sessions and SDK clients. Per-call
+  generator state is now kept per thread so sessions cannot interfere.
