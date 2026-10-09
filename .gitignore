@@ -4,3 +4,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .streamlit/
+.env.*
+!.env.example
+venv/
+.ruff_cache/
+.coverage
+*.egg-info/
+.DS_Store

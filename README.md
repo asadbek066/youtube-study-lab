@@ -2,7 +2,7 @@
 
 # YouTube Study Lab
 
-**Turn a captioned YouTube video—or pasted transcript—into a summary, revision notes, and an active-recall quiz.**
+**Turn a captioned YouTube video or a pasted transcript into a summary, revision notes, and a quiz.**
 
 [![CI](https://github.com/asadbek066/youtube-study-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/asadbek066/youtube-study-lab/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Live Demo](https://img.shields.io/badge/Live_Demo-Open_App-EA580C?logo=streamlit&logoColor=white)](https://yowassup.streamlit.app/)
 
-**No API key required · Hosted-server fallback · 18-question quiz · Markdown export**
+**No API key required · Pasted-transcript fallback · 18-question quiz · Markdown export**
 
 ### [Open the live app →](https://yowassup.streamlit.app/)
 
@@ -18,7 +18,7 @@
 
 ![YouTube Study Lab instant-demo walkthrough](docs/assets/demo.gif)
 
-## Try it in 30 seconds
+## Quick start
 
 Open the **[live app](https://yowassup.streamlit.app/)** and click **See a complete study pack instantly**. The built-in demo uses an original sample transcript and local generation, so it makes no YouTube or model-provider request.
 
@@ -185,14 +185,10 @@ requirements-dev.txt --universal --python-version 3.11 --generate-hashes`.
 - Provider output passes format, source-vocabulary, and citation-link checks;
   those checks reduce obvious fabrication but are not an independent factual
   verification system.
-- Exported Markdown sanitizes video titles, caption language metadata, and
-  classification reasons before writing the file.
 
 ## Contributing
 
 Bug reports, focused feature proposals, documentation improvements, and tested fixes are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
-
-If this tool makes video learning easier for you, consider **starring the repository**. Follow [@asadbek066](https://github.com/asadbek066) for more practical AI and developer tools.
 
 ## License
 
