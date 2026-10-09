@@ -277,3 +277,36 @@ def test_transcript_timeout_surfaces_a_clear_error(monkeypatch) -> None:
     errors = " ".join(error.value for error in app.error)
     assert "timed out" in errors
     assert not app.exception
+
+
+def test_exhausted_hosted_budget_tells_the_user_when_it_resets(monkeypatch) -> None:
+    import youtube_study_tool.generation as generation_module
+    from youtube_study_tool.generation import ProviderCallBudget
+
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    budget = ProviderCallBudget(max_calls=5, window_seconds=3600)
+    for _ in range(5):
+        assert budget.try_reserve()
+    monkeypatch.setattr(generation_module, "PROVIDER_CALL_BUDGET", budget)
+    monkeypatch.setattr("app.PROVIDER_CALL_BUDGET", budget)
+    st_cache_clear()
+
+    app = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
+    _submit_manual_transcript(app)
+
+    warnings = " ".join(warning.value for warning in app.warning)
+    assert "hosted OpenAI limit was reached" in warnings
+    assert "5 provider calls per hour" in warnings
+    assert "can resume in about an hour" in warnings
+    assert "shared by everyone" in warnings
+    assert app.session_state["analysis_bundle"].provider == "Heuristic fallback"
+    assert "paid_generation_submissions" not in app.session_state
+    assert not app.exception
+    st_cache_clear()
+
+
+def st_cache_clear() -> None:
+    import streamlit as st
+
+    st.cache_resource.clear()

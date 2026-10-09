@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 from youtube_study_tool.demo import build_demo_transcript
 from youtube_study_tool.fallback import generate_fallback_bundle
-from youtube_study_tool.generation import StudyPackGenerator
+from youtube_study_tool.generation import PROVIDER_CALL_BUDGET, StudyPackGenerator
 from youtube_study_tool.manual import build_manual_transcript
 from youtube_study_tool.models import (
     MAX_TRANSCRIPT_CHARS,
@@ -343,6 +343,13 @@ def generate_study_pack(
     return analysis
 
 
+def _describe_wait(seconds: float) -> str:
+    minutes = max(1, round(seconds / 60))
+    if minutes >= 60:
+        return "about an hour"
+    return f"about {minutes} minute{'s' if minutes != 1 else ''}"
+
+
 def degradation_notice(
     generator: StudyPackGenerator, analysis: AnalysisBundle
 ) -> str | None:
@@ -353,6 +360,14 @@ def degradation_notice(
         or analysis.provider == generator.provider_label
     ):
         return None
+    if generator.budget_retry_after_seconds > 0:
+        return (
+            f"The hosted {generator.provider_label} limit was reached "
+            f"({PROVIDER_CALL_BUDGET.max_calls} provider calls per hour, shared by "
+            "everyone using this server), so this study pack was generated with "
+            "local rules instead. Provider generation can resume in "
+            f"{_describe_wait(generator.budget_retry_after_seconds)}."
+        )
     return (
         f"{generator.provider_label} was unavailable, so this study pack was "
         f"generated locally ({generator.last_fallback_reason})."
