@@ -1,13 +1,15 @@
+# Version-update pull requests are off (limit 0): dependencies are bumped by hand on main.
+# Dependabot alerts are a repository setting and are not affected by this file.
 version: 2
 updates:
   - package-ecosystem: pip
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0

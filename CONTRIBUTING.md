@@ -21,8 +21,8 @@ uv pip compile requirements-dev.txt --universal --python-version 3.11 \
   --generate-hashes --output-file requirements-dev.lock
 ```
 
-Dependabot cannot regenerate the locks, so its pip pull requests need the same
-recompile before CI passes.
+Dependabot version-update pull requests are switched off; bump dependencies by
+hand and recompile the locks.
 
 ## Checks
 
