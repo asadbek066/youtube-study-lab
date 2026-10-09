@@ -133,6 +133,15 @@ Useful settings from `.env.example` include:
 - `LLM_MAX_PROVIDER_CALLS_PER_HOUR`: process-wide provider-call budget shared
   by all sessions (default 120; read at startup)
 
+Deployment note: the provider-call budget is one counter for the whole server
+process, and the per-session paid-submission cap lives in browser-session state
+that a page reload resets. Streamlit offers no trustworthy client identity, so
+the app cannot throttle individual clients itself. When the shared budget is
+spent, every user gets local-rules output with a notice saying the hosted limit
+was reached and when a slot frees up. To stop one client from exhausting the
+budget for everyone, rate-limit per client IP at a reverse proxy (for example
+nginx `limit_req` or a CDN rule) in front of the app.
+
 The app validates numeric bounds and provider URLs, and automatically falls
 back to local generation when a configured provider is unavailable. When that
 happens the pack is labeled as locally generated and the interface says why.

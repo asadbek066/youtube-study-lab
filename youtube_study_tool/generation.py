@@ -106,6 +106,17 @@ class ProviderCallBudget:
         with self._lock:
             self._calls.clear()
 
+    def seconds_until_slot(self) -> float:
+        """Seconds until the oldest counted call leaves the window (0 if free)."""
+        now = monotonic()
+        with self._lock:
+            cutoff = now - self.window_seconds
+            while self._calls and self._calls[0] <= cutoff:
+                self._calls.popleft()
+            if len(self._calls) < self.max_calls:
+                return 0.0
+            return max(0.0, self._calls[0] + self.window_seconds - now)
+
 
 def _read_budget_limit() -> int:
     value = os.getenv("LLM_MAX_PROVIDER_CALLS_PER_HOUR", "").strip()
@@ -164,6 +175,14 @@ class GenerationLimitExceeded(RuntimeError):
     """Raised when an input would exceed the paid-generation call budget."""
 
 
+class ProviderBudgetExhausted(GenerationLimitExceeded):
+    """The process-wide hourly provider-call budget has no free slot."""
+
+    def __init__(self, message: str, retry_after_seconds: float) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
 class _PerCall:
     """Attribute stored per thread, so a shared generator keeps calls apart.
 
@@ -194,6 +213,7 @@ class StudyPackGenerator:
     """
 
     last_fallback_reason = _PerCall("")
+    budget_retry_after_seconds = _PerCall(0.0)
     _provider_calls = _PerCall(0)
     _deadline = _PerCall(float("inf"))
 
@@ -240,9 +260,15 @@ class StudyPackGenerator:
 
     def generate(self, bundle: TranscriptBundle) -> AnalysisBundle:
         self.last_fallback_reason = ""
+        self.budget_retry_after_seconds = 0.0
         if self.is_ready:
             try:
                 return self._generate_with_llm(bundle)
+            except ProviderBudgetExhausted as error:
+                logger.warning("LLM generation skipped: %s", error)
+                self.last_fallback_reason = str(error)
+                self.budget_retry_after_seconds = error.retry_after_seconds
+                return generate_fallback_bundle(bundle)
             except GenerationLimitExceeded as error:
                 logger.warning("LLM generation skipped: %s", error)
                 self.last_fallback_reason = str(error) or "provider budget reached"
@@ -446,9 +472,10 @@ class StudyPackGenerator:
                 "provider call budget reached; using local fallback"
             )
         if not PROVIDER_CALL_BUDGET.try_reserve():
-            raise GenerationLimitExceeded(
+            raise ProviderBudgetExhausted(
                 "the server-wide provider call budget for this hour is exhausted; "
-                "using local fallback"
+                "using local fallback",
+                PROVIDER_CALL_BUDGET.seconds_until_slot(),
             )
         self._provider_calls += 1
 

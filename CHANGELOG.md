@@ -45,3 +45,7 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
   all settings so API keys never enter the cache key) instead of on every
   rerun; evicted entries close their HTTP sessions and SDK clients. Per-call
   generator state is now kept per thread so sessions cannot interfere.
+- When the shared hourly provider budget is exhausted, the interface now says the
+  hosted limit was reached and roughly when provider generation can resume,
+  instead of silently returning local-rules output. The README documents that
+  per-client throttling must be done at a reverse proxy.

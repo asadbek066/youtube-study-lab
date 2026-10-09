@@ -489,3 +489,36 @@ def test_client_init_errors_do_not_log_keys(monkeypatch, caplog) -> None:
     assert generator.client is None
     assert "test-key" not in caplog.text
     assert "Traceback" not in caplog.text
+
+
+def test_budget_exhaustion_reports_when_a_slot_frees_up(monkeypatch) -> None:
+    import youtube_study_tool.generation as generation_module
+    from youtube_study_tool.generation import ProviderCallBudget
+
+    generator = _ready_generator()
+    bundle = build_manual_transcript("A model learns from examples and feedback.")
+    budget = ProviderCallBudget(max_calls=1, window_seconds=600)
+    assert budget.try_reserve()
+    monkeypatch.setattr(generation_module, "PROVIDER_CALL_BUDGET", budget)
+
+    analysis = generator.generate(bundle)
+
+    assert analysis.provider == "Heuristic fallback"
+    assert 0 < generator.budget_retry_after_seconds <= 600
+    assert generator.provider_calls_used == 0
+    # The marker is cleared by the next generation once capacity is back.
+    budget.reset()
+    monkeypatch.setattr(generator, "_generate_with_llm", lambda _b: analysis)
+    generator.generate(bundle)
+    assert generator.budget_retry_after_seconds == 0.0
+
+
+def test_seconds_until_slot_is_zero_while_capacity_remains() -> None:
+    from youtube_study_tool.generation import ProviderCallBudget
+
+    budget = ProviderCallBudget(max_calls=2, window_seconds=100)
+    assert budget.seconds_until_slot() == 0.0
+    budget.try_reserve()
+    assert budget.seconds_until_slot() == 0.0
+    budget.try_reserve()
+    assert 0 < budget.seconds_until_slot() <= 100
