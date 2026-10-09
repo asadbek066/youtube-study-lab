@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
@@ -74,13 +76,13 @@ class LLMSettings:
     requested_provider: str
     provider: str
     llm_model_override: str
-    openai_api_key: str
+    openai_api_key: str = field(repr=False)
     openai_model: str
     openai_base_url: str
-    azure_openai_api_key: str
+    azure_openai_api_key: str = field(repr=False)
     azure_openai_endpoint: str
     azure_openai_deployment: str
-    gemini_api_key: str
+    gemini_api_key: str = field(repr=False)
     gemini_model: str
     temperature: float
     chunk_max_output_tokens: int
@@ -213,3 +215,22 @@ def load_settings() -> LLMSettings:
             "SUMMARY_DETAIL", "balanced", SUPPORTED_SUMMARY_DETAILS
         ),
     )
+
+
+# Random per process and kept in this module (not in the Streamlit script, which
+# is re-executed on every rerun), so fingerprints are stable within a process
+# but meaningless across restarts.
+_FINGERPRINT_SALT = os.urandom(16)
+
+
+def settings_fingerprint(settings: LLMSettings) -> str:
+    """Non-reversible digest of every setting, including the API keys.
+
+    Streamlit hashes the arguments of a cached function and may show or log
+    them, so the settings object itself is passed as an unhashed ``_`` argument
+    and only this keyed digest forms the cache key. Any changed field (provider,
+    model, base URL, temperature, token limits, summary style or detail, keys)
+    yields a different digest and therefore a new cached object.
+    """
+    payload = json.dumps(asdict(settings), sort_keys=True).encode()
+    return hashlib.blake2b(payload, key=_FINGERPRINT_SALT, digest_size=16).hexdigest()

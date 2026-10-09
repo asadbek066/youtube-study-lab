@@ -16,6 +16,7 @@ from youtube_study_tool.models import (
     AnalysisBundle,
     TranscriptBundle,
 )
+from youtube_study_tool.settings import LLMSettings, load_settings, settings_fingerprint
 from youtube_study_tool.transcripts import (
     TranscriptBusyError,
     TranscriptRetrievalError,
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 MAX_RENDERED_SEGMENTS = 200
 MAX_TRANSCRIPT_PREVIEW_CHARS = 60_000
 MAX_PAID_SUBMISSIONS_PER_SESSION = 3
+MAX_CACHED_GENERATORS = 4
 
 st.set_page_config(
     page_title="YouTube Study Lab",
@@ -381,10 +383,38 @@ def cached_study_pack(
     return text, urls
 
 
+def _release_resource(resource: object) -> None:
+    close = getattr(resource, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # noqa: BLE001 - eviction cleanup must never raise.
+            logger.debug("Closing an evicted resource failed")
+
+
+@st.cache_resource(
+    max_entries=MAX_CACHED_GENERATORS, on_release=_release_resource, show_spinner=False
+)
+def _cached_generator(fingerprint: str, _settings: LLMSettings) -> StudyPackGenerator:
+    return StudyPackGenerator(_settings)
+
+
+def get_generator() -> StudyPackGenerator:
+    """Process-wide generator for the current configuration."""
+    settings = load_settings()
+    return _cached_generator(settings_fingerprint(settings), settings)
+
+
+@st.cache_resource(max_entries=1, on_release=_release_resource, show_spinner=False)
+def get_transcript_service() -> TranscriptService:
+    """Process-wide transcript service (it has no configurable settings)."""
+    return TranscriptService()
+
+
 def run() -> None:
     render_hero()
-    transcript_service = TranscriptService()
-    generator = StudyPackGenerator()
+    transcript_service = get_transcript_service()
+    generator = get_generator()
 
     with st.sidebar:
         st.header("Study settings")

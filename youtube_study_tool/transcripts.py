@@ -227,7 +227,12 @@ def normalize_languages(raw_languages: str) -> tuple[str, ...]:
 
 class TranscriptService:
     def __init__(self) -> None:
-        self.api = YouTubeTranscriptApi(http_client=_BoundedYouTubeSession())
+        self._session = _BoundedYouTubeSession()
+        self.api = YouTubeTranscriptApi(http_client=self._session)
+
+    def close(self) -> None:
+        """Release the pooled HTTP connections held by the shared session."""
+        self._session.close()
 
     def fetch(
         self, source: str, preferred_languages: Iterable[str]

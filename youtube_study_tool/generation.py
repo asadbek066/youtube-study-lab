@@ -164,14 +164,53 @@ class GenerationLimitExceeded(RuntimeError):
     """Raised when an input would exceed the paid-generation call budget."""
 
 
+class _PerCall:
+    """Attribute stored per thread, so a shared generator keeps calls apart.
+
+    Streamlit runs every session in its own thread and a generation and the UI
+    code that reads its outcome run on that same thread.
+    """
+
+    def __init__(self, default: Any) -> None:
+        self.default = default
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+
+    def __get__(self, instance: Any, owner: type | None = None) -> Any:
+        if instance is None:
+            return self
+        return getattr(instance._call_state, self.name, self.default)
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        setattr(instance._call_state, self.name, value)
+
+
 class StudyPackGenerator:
+    """Builds study packs. One instance may be shared by many threads.
+
+    Settings and the SDK client are immutable after construction; everything
+    that describes a single generation lives in per-thread state.
+    """
+
+    last_fallback_reason = _PerCall("")
+    _provider_calls = _PerCall(0)
+    _deadline = _PerCall(float("inf"))
+
     def __init__(self, settings: LLMSettings | None = None) -> None:
+        self._call_state = threading.local()
         self.settings = settings or load_settings()
         self.client_error = ""
-        self.last_fallback_reason = ""
-        self._provider_calls = 0
-        self._deadline = float("inf")
         self.client = self._build_client()
+
+    def close(self) -> None:
+        """Release the SDK client's connection pool."""
+        closer = getattr(self.client, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:  # noqa: BLE001 - cleanup must never raise.
+                logger.debug("Provider client close failed", exc_info=False)
 
     @property
     def provider_label(self) -> str:
